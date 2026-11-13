@@ -14,25 +14,35 @@ def timestamp(seconds, separator='.'):
     return f'{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}'
 
 
+def segment_text(segment):
+    text = segment['text'].strip()
+    speaker = segment.get('speaker')
+    return f'{speaker}: {text}' if speaker else text
+
+
 def render(result, format):
     segments = result.get('segments', [])
     if format == 'txt':
-        return '\n'.join(s['text'].strip() for s in segments).strip() + '\n'
+        return '\n'.join(segment_text(s) for s in segments).strip() + '\n'
     if format in ('srt', 'vtt'):
         separator = ',' if format == 'srt' else '.'
         blocks = []
         for index, segment in enumerate(segments, 1):
             timing = f"{timestamp(segment['start'], separator)} --> {timestamp(segment['end'], separator)}"
             prefix = f'{index}\n' if format == 'srt' else ''
-            blocks.append(prefix + timing + '\n' + segment['text'].strip())
+            blocks.append(prefix + timing + '\n' + segment_text(segment))
         return ('WEBVTT\n\n' if format == 'vtt' else '') + '\n\n'.join(blocks) + '\n'
     if format == 'json':
         return json.dumps(result, ensure_ascii=False, indent=2) + '\n'
     if format == 'csv':
         output = io.StringIO(newline='')
         writer = csv.writer(output)
-        writer.writerow(['start', 'end', 'text'])
-        writer.writerows((s['start'], s['end'], s['text'].strip()) for s in segments)
+        if any('speaker' in segment for segment in segments):
+            writer.writerow(['start', 'end', 'speaker', 'text'])
+            writer.writerows((s['start'], s['end'], s.get('speaker') or '', s['text'].strip()) for s in segments)
+        else:
+            writer.writerow(['start', 'end', 'text'])
+            writer.writerows((s['start'], s['end'], s['text'].strip()) for s in segments)
         return output.getvalue()
     raise ValueError(f'Nieznany format: {format}')
 

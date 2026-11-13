@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$SkipGpuTest)
+param([switch]$SkipGpuTest, [string]$GpuId = '')
 $ErrorActionPreference = 'Stop'
 $env:PYTHONIOENCODING = 'utf-8'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
@@ -41,8 +41,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Dependency check failed.' }
 if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { & nvidia-smi --query-gpu=name,driver_version --format=csv }
 else { Write-Warning 'nvidia-smi not found. Install the current NVIDIA driver for CUDA.' }
 Write-Host 'Environment diagnostics:'
-if ($SkipGpuTest) { & $venvPython -m app.core.gpu_manager }
-else { & $venvPython -m app.core.gpu_manager --test --download }
+$gpuArgs = @()
+if ($GpuId) { $gpuArgs = @('--gpu-id', $GpuId) }
+if ($SkipGpuTest) { & $venvPython -m app.core.gpu_manager @gpuArgs }
+else { & $venvPython -m app.core.gpu_manager --test --download @gpuArgs }
 if ($LASTEXITCODE -ne 0) {
     Write-Warning 'CUDA inference failed. See the report above; CPU can still be selected explicitly.'
     exit 1

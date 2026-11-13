@@ -10,4 +10,5 @@ pydantic>=2.10,<3
 psutil>=6,<8
 nvidia-ml-py>=12,<14
 sounddevice>=0.5,<1
+sherpa-onnx==2.0.1
 pytest>=8,<10

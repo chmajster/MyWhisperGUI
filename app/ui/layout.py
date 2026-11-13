@@ -8,17 +8,18 @@ import psutil
 from nicegui import run, ui
 
 from app.config import MODEL_REPOS, Settings
-from app.core.audio_processor import store_upload
-from app.core.exporter import export_all, timestamp
-from app.core.gpu_manager import diagnostics, gpu_stats, inference_test
+from app.core.audio_processor import VIDEO_EXTENSIONS, store_upload
+from app.core.exporter import export_all, segment_text, timestamp
+from app.core.gpu_manager import cuda_devices, diagnostics, gpu_stats, inference_test
 
 STATUS = {'waiting': 'Oczekuje', 'downloading': 'Pobieranie modelu', 'preparing': 'Przygotowanie',
           'transcribing': 'Transkrypcja', 'exporting': 'Eksport', 'done': 'Ukończono',
           'error': 'Błąd', 'cancelled': 'Anulowano'}
 NAV = [('dashboard', 'Dashboard', 'space_dashboard'), ('transcription', 'Transkrypcja', 'graphic_eq'),
-       ('recording', 'Nagrywanie', 'mic_none'), ('queue', 'Kolejka', 'view_list'),
+       ('captions', 'Napisy na żywo', 'closed_caption'), ('recording', 'Nagrywanie', 'mic_none'), ('queue', 'Kolejka', 'view_list'),
        ('history', 'Historia', 'history'), ('models', 'Modele AI', 'memory'),
        ('settings', 'Ustawienia', 'tune'), ('diagnostics', 'Diagnostyka', 'monitor_heart')]
+EDITOR_PAGE_SIZE = 50
 
 CSS = '''
 <style>
@@ -45,15 +46,37 @@ body { font-family:Inter,Segoe UI,sans-serif; }
 .hint { font-size:12px; color:#8994aa; }
 .status-chip { background:rgba(167,139,250,.14); color:#c4b5fd; border-radius:6px; padding:3px 9px; font-size:12px; }
 .model-row { border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:10px; }
-.model-row.ready { border-color:rgba(52,211,153,.45); background:rgba(16,185,129,.06); }
-.model-badge { padding:5px 10px; border-radius:7px; font-size:11px; font-weight:700; letter-spacing:.04em; background:rgba(148,163,184,.12); color:#a8b2c7; }
-.model-badge.ready { background:rgba(16,185,129,.16); color:#6ee7b7; }
+.model-row.missing { border-color:rgba(148,163,184,.35); }
+.model-row.partial { border-color:rgba(251,191,36,.55); background:rgba(245,158,11,.06); }
+.model-row.downloading { border-color:rgba(56,189,248,.7); background:rgba(14,165,233,.09); }
+.model-row.ready { border-color:rgba(52,211,153,.6); background:rgba(16,185,129,.08); }
+.model-row.error { border-color:rgba(248,113,113,.7); background:rgba(239,68,68,.08); }
+.model-info { color:#b3bed0; font-size:12px; line-height:1.5; padding:3px 0; overflow-wrap:anywhere; }
+.model-badge { padding:7px 11px; border-radius:8px; font-size:12px; font-weight:700; letter-spacing:.03em; }
+.model-badge.missing { background:rgba(148,163,184,.16); color:#cbd5e1; }
+.model-badge.partial { background:rgba(245,158,11,.18); color:#fcd34d; }
+.model-badge.downloading { background:rgba(14,165,233,.22); color:#7dd3fc; }
+.model-badge.ready { background:rgba(16,185,129,.2); color:#6ee7b7; }
+.model-badge.error { background:rgba(239,68,68,.2); color:#fca5a5; }
+.body--light .model-info { color:#475569; }
+.body--light .model-badge.missing { color:#334155; }
+.body--light .model-badge.partial { color:#92400e; }
+.body--light .model-badge.downloading { color:#075985; }
 .body--light .model-badge.ready { color:#047857; }
+.body--light .model-badge.error { color:#b91c1c; }
+@keyframes model-spin { to { transform:rotate(360deg); } }
+.model-spin { animation:model-spin 1.2s linear infinite; }
+@media (prefers-reduced-motion:reduce) { .model-spin { animation:none; } }
 .live-feed { background:rgba(2,6,23,.24); border:1px solid var(--line); border-radius:10px; }
 .body--light .live-feed { background:#f8fafc; }
+.live-caption-text { font-size:22px; line-height:1.55; padding:20px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.live-microphone-active { color:#f87171; font-weight:700; }
+.body--light .live-microphone-active { color:#b91c1c; }
 .q-field--outlined .q-field__control { border-radius:9px; }
 .q-btn { letter-spacing:0; }
 .job-row { border-top:1px solid var(--line); padding:16px 0; }
+.options-panel { border:1px solid var(--line); border-radius:10px; margin-top:10px; }
+.parameter-guide-item { border-top:1px solid var(--line); padding:10px 0; }
 .record-dot { color:#fb7185; font-size:30px; }
 @media(max-width:800px) { .sidebar { width:70px; padding:18px 8px; } .sidebar .q-btn__content span.block, .brand-title, .brand-sub, .side-caption {display:none;} .nav-btn {justify-content:center;} .main {padding:25px 18px;} .model-row, .queue-job-header {flex-wrap:wrap !important;} .model-row > .grow, .queue-job-header > .grow {min-width:100%;} }
 </style>
@@ -68,6 +91,23 @@ def human_size(size):
         if value < 1024 or unit == 'TB':
             return f'{value:.1f} {unit}'
         value /= 1024
+
+
+def model_state(detail):
+    status = detail.get('status') or ''
+    if status == 'Sprawdzanie plików':
+        return 'checking'
+    if status == 'Pobieranie':
+        return 'downloading'
+    if status == 'Anulowanie':
+        return 'cancelling'
+    if status == 'Anulowano':
+        return 'cancelled'
+    if status.startswith('Błąd:'):
+        return 'error'
+    if detail.get('available'):
+        return 'ready'
+    return 'partial' if detail.get('size', 0) > 0 else 'missing'
 
 
 def short_time(seconds):
@@ -94,9 +134,86 @@ def eta_text(job):
     return f'ETA: około {short_time(eta)}'
 
 
+def dashboard_gpu_id(jobs, default_settings, loaded_gpu):
+    for status in ('transcribing', 'preparing', 'downloading', 'exporting'):
+        for job in jobs:
+            if job['status'] != status:
+                continue
+            try:
+                options = Settings.model_validate_json(job['options'])
+            except ValueError:
+                continue
+            if options.device == 'cuda':
+                return options.gpu_id
+    return loaded_gpu['id'] if loaded_gpu else default_settings.gpu_id
+
+
 def header(title, subtitle):
     ui.label(title).classes('page-title')
     ui.label(subtitle).classes('muted q-mt-xs q-mb-lg')
+
+
+def gpu_picker(selected=''):
+    """Load CUDA devices without blocking the page while the driver initializes."""
+    options = {'': 'Automatycznie · pierwsza karta CUDA'}
+    if selected:
+        options[selected] = 'Wyszukiwanie zapisanej karty…'
+    state = {'enabled': True, 'available': False, 'detected': False, 'valid_ids': set(), 'count': 0}
+    with ui.column().classes('grow min-w-44 gap-0'):
+        field = ui.select(options, label='Karta GPU', value=selected).classes('w-full').props('outlined')
+        field.set_enabled(False)
+        hint = ui.label('Wykrywanie kart CUDA…').classes('hint')
+
+    def set_enabled(enabled):
+        state['enabled'] = enabled
+        field.set_enabled(enabled and state['available'])
+
+    def update_hint():
+        if not state['detected']:
+            return
+        if field.value and field.value not in state['valid_ids']:
+            hint.set_text('Zapisana karta nie jest dostępna. Wybierz inną kartę przed transkrypcją.')
+        elif state['available']:
+            hint.set_text(f"Wykryto kart CUDA: {state['count']}. Wybór jest zapisywany dla zadania.")
+        else:
+            hint.set_text('Nie wykryto kart CUDA. Wybierz CPU lub sprawdź sterownik NVIDIA.')
+
+    field.on_value_change(lambda _: update_hint())
+
+    async def detect():
+        try:
+            devices = await run.io_bound(cuda_devices)
+            if field.is_deleted:
+                return
+            devices = devices or []
+            current = field.value or ''
+            choices = {'': 'Automatycznie · pierwsza karta CUDA'}
+            for device in devices:
+                memory = f" · {human_size(device['memory_total'])} VRAM" if device.get('memory_total') else ''
+                choices[device['id']] = f"CUDA {device['index']} · {device['name']}{memory}"
+            valid_ids = set(choices)
+            if current.startswith('cuda:') and current[5:].isdigit() and current not in choices:
+                indexed = next((device for device in devices if device['index'] == int(current[5:])), None)
+                if indexed:
+                    choices[current] = f"CUDA {indexed['index']} · {indexed['name']} (zapis według indeksu)"
+                    valid_ids.add(current)
+            missing = bool(current and current not in choices)
+            if missing:
+                choices[current] = f'Niedostępna karta: {current}'
+            field.set_options(choices)
+            state['available'] = bool(devices)
+            state['detected'] = True
+            state['valid_ids'] = valid_ids
+            state['count'] = len(devices)
+            set_enabled(state['enabled'])
+            update_hint()
+        except Exception as exc:
+            if not field.is_deleted:
+                hint.set_text(f'Nie można wykryć kart CUDA: {exc}')
+                set_enabled(False)
+
+    ui.timer(.1, detect, once=True)
+    return field, set_enabled
 
 
 def option_form(settings, include_paths=False):
@@ -107,15 +224,78 @@ def option_form(settings, include_paths=False):
         fields['task'] = ui.select({'transcribe': 'Transkrypcja', 'translate': 'Tłumaczenie na angielski'}, label='Tryb', value=settings.task).classes('grow min-w-44').props('outlined')
     with ui.row().classes('w-full gap-4 items-start'):
         fields['device'] = ui.select({'cuda': 'GPU · CUDA', 'cpu': 'CPU (świadomie)'}, label='Urządzenie', value=settings.device).classes('grow min-w-44').props('outlined')
+        fields['gpu_id'], set_gpu_enabled = gpu_picker(settings.gpu_id)
         fields['compute_type'] = ui.select({'auto': 'Automatyczna', 'float16': 'Wydajność · float16', 'int8_float16': 'Oszczędzanie VRAM · int8_float16'}, label='Precyzja GPU', value=settings.compute_type).classes('grow min-w-44').props('outlined')
         fields['beam_size'] = ui.number('Beam size', min=1, max=10, step=1, value=settings.beam_size, precision=0).classes('w-32').props('outlined')
         fields['temperature'] = ui.number('Temperature', min=0, max=1, step=.1, value=settings.temperature).classes('w-32').props('outlined')
+    ui.label('Temperatura 0 używa Beam size; powyżej 0 działa losowanie i parametr Best of.').classes('hint')
     with ui.row().classes('w-full gap-5'):
         fields['vad'] = ui.switch('Filtr ciszy VAD', value=settings.vad)
+        fields['diarization'] = ui.switch('Rozróżniaj rozmówców', value=settings.diarization)
         fields['word_timestamps'] = ui.switch('Znaczniki słów', value=settings.word_timestamps)
         fields['keep_model'] = ui.switch('Pozostaw model w pamięci', value=settings.keep_model)
+    ui.label('Rozmówcy: analiza lokalna na CPU. Przy pierwszym użyciu zostaną pobrane modele (około 46 MB); wyniki można poprawić w edytorze.').classes('hint')
     fields['initial_prompt'] = ui.textarea('Kontekst początkowy (opcjonalny)', value=settings.initial_prompt).classes('w-full').props('outlined autogrow')
     ui.label('Whisper tłumaczy mowę wyłącznie na angielski. Turbo nie obsługuje trybu tłumaczenia.').classes('hint')
+
+    with ui.expansion('Dodatkowe parametry transkrypcji', caption='Sposób rozpoznawania, podpowiedzi i filtr ciszy', icon='tune').classes('w-full options-panel'):
+        ui.label('Wartości domyślne są odpowiednie na początek. Nieaktywne pola nie wpływają na wybrany tryb.').classes('hint q-mb-sm')
+        with ui.row().classes('w-full gap-4 items-start'):
+            fields['best_of'] = ui.number('Best of', min=1, max=10, step=1, precision=0, value=settings.best_of).classes('grow min-w-44').props('outlined')
+            fields['patience'] = ui.number('Cierpliwość (patience)', min=.1, max=5, step=.1, precision=1, value=settings.patience).classes('grow min-w-44').props('outlined')
+            fields['repetition_penalty'] = ui.number('Kara powtórzeń', min=1, max=3, step=.1, precision=1, value=settings.repetition_penalty).classes('grow min-w-44').props('outlined')
+            fields['no_repeat_ngram_size'] = ui.number('Blokada powtórzeń (tokeny)', min=0, max=10, step=1, precision=0, value=settings.no_repeat_ngram_size).classes('grow min-w-44').props('outlined')
+        with ui.row().classes('w-full gap-4 items-start'):
+            fields['no_speech_threshold'] = ui.number('Próg ciszy Whisper', min=0, max=1, step=.05, precision=2, value=settings.no_speech_threshold).classes('grow min-w-44').props('outlined')
+            fields['vad_threshold'] = ui.number('Próg mowy VAD', min=.05, max=.95, step=.05, precision=2, value=settings.vad_threshold).classes('grow min-w-44').props('outlined')
+            fields['vad_min_silence_ms'] = ui.number('Minimalna cisza VAD (ms)', min=100, max=10000, step=100, precision=0, value=settings.vad_min_silence_ms).classes('grow min-w-44').props('outlined')
+            fields['vad_speech_pad_ms'] = ui.number('Zapas mowy VAD (ms)', min=0, max=1500, step=50, precision=0, value=settings.vad_speech_pad_ms).classes('grow min-w-44').props('outlined')
+        fields['condition_on_previous_text'] = ui.switch('Używaj poprzedniego tekstu jako kontekstu', value=settings.condition_on_previous_text)
+        fields['hotwords'] = ui.textarea('Słowa podpowiedzi (opcjonalnie)', value=settings.hotwords,
+                                         placeholder='Np. nazwiska, nazwy firm lub trudne terminy').classes('w-full').props('outlined autogrow')
+
+    guide = [
+        ('Model Whisper', 'Większe modele wymagają więcej pamięci i czasu; mogą lepiej rozpoznawać trudną mowę. Turbo nie służy do tłumaczenia.'),
+        ('Język i tryb', 'Wybierz język nagrania albo wykrywanie automatyczne z pierwszej porcji. Tryb tłumaczenia Whisper daje tekst po angielsku.'),
+        ('Urządzenie, karta GPU i precyzja', 'Wybierz konkretną kartę NVIDIA CUDA albo CPU. Wybrana karta jest zapisywana dla zadania. Int8/float16 może zużywać mniej VRAM niż float16; tryb automatyczny dobiera precyzję dla wybranej karty.'),
+        ('Beam size', 'Przy temperaturze 0 określa liczbę rozważanych wariantów. 1 jest zwykle szybsze, 5 to domyślna wartość; większa liczba może pomóc kosztem czasu, bez gwarancji poprawy.'),
+        ('Temperature', '0 daje deterministyczny wybór z użyciem Beam size. Powyżej 0 włącza losowanie i Best of; wyniki mogą się różnić między uruchomieniami. Aplikacja używa jednej ustawionej temperatury.'),
+        ('Best of', 'Liczba losowanych kandydatów ocenianych przy temperaturze powyżej 0. Więcej kandydatów może wydłużyć pracę; domyślnie 5.'),
+        ('Cierpliwość (patience)', 'Przy temperaturze 0 określa, jak długo wyszukiwanie rozważa warianty. Wyższa wartość może zwiększyć czas pracy; domyślnie 1.'),
+        ('Kara powtórzeń', 'Wartość powyżej 1 zniechęca do ponownego używania tych samych tokenów; zbyt wysoka może usuwać potrzebne powtórzenia. 1 wyłącza karę.'),
+        ('Blokada powtórzeń', 'Zapobiega powtórzeniu sekwencji o podanej liczbie tokenów (części słów, niekoniecznie całych słów). 0 wyłącza blokadę; niska wartość może nadmiernie ograniczyć tekst.'),
+        ('Próg ciszy Whisper', 'Wraz z oceną pewności pomaga uznać fragment za ciszę. Wyższy próg może zachować więcej cichej mowy, ale też więcej ciszy; domyślnie 0,6.'),
+        ('Filtr ciszy VAD i próg mowy', 'VAD próbuje oddzielić mowę od ciszy przed transkrypcją. Niższy próg może wykryć cichszą mowę, ale też więcej szumu; domyślnie 0,5.'),
+        ('Minimalna cisza VAD', 'Czas ciszy w milisekundach potrzebny do oddzielenia fragmentów mowy. Krótszy dzieli przy krótszych pauzach; domyślnie 2000 ms.'),
+        ('Zapas mowy VAD', 'Dodatkowy czas przed i po wykrytej mowie. Zbyt mały może obciąć początek lub koniec wypowiedzi; domyślnie 400 ms.'),
+        ('Poprzedni tekst jako kontekst', 'Przekazuje poprzedni wynik w ramach tej samej porcji audio. Wyłączenie może ograniczyć zapętlanie powtórzeń, ale pogorszyć spójność; aplikacja przetwarza porcje do 30 sekund.'),
+        ('Kontekst początkowy i słowa podpowiedzi', 'Pomagają zasugerować temat, pisownię nazw i trudnych słów. Są wskazówką, nie gwarancją rozpoznania; kontekst jest podawany dla każdej porcji.'),
+        ('Znaczniki słów', 'Dodają orientacyjny czas dla każdego słowa, co może wydłużyć transkrypcję.'),
+        ('Rozróżnianie rozmówców', 'Oznacza głosy jako Rozmówca 1, 2 itd. Numery obowiązują w bieżącym nagraniu, a nie identyfikują osób po imieniu. Nakładające się lub krótkie wypowiedzi mogą pozostać nieustalone.'),
+        ('Pozostaw model w pamięci', 'Przyspiesza kolejne zadania tym samym modelem, ale nadal zajmuje RAM lub VRAM.'),
+    ]
+    if include_paths:
+        guide.append(('Równoległe zadania i limit pliku', 'Limit pracowników dotyczy kolejki, lecz jednocześnie działa najwyżej jedna transkrypcja GPU. Limit pliku określa maksymalny rozmiar pojedynczego importu.'))
+    with ui.expansion('Legenda parametrów', caption='Objaśnienia Beam size, temperatury, VAD i pozostałych opcji', icon='help_outline').classes('w-full options-panel'):
+        for title, description in guide:
+            with ui.column().classes('w-full gap-1 parameter-guide-item'):
+                ui.label(title).classes('font-medium text-sm')
+                ui.label(description).classes('hint')
+
+    def update_parameter_controls():
+        set_gpu_enabled(fields['device'].value == 'cuda')
+        sampling = (fields['temperature'].value or 0) > 0
+        fields['beam_size'].set_enabled(not sampling)
+        fields['patience'].set_enabled(not sampling)
+        fields['best_of'].set_enabled(sampling)
+        for name in ('vad_threshold', 'vad_min_silence_ms', 'vad_speech_pad_ms'):
+            fields[name].set_enabled(bool(fields['vad'].value))
+
+    fields['temperature'].on_value_change(lambda _: update_parameter_controls())
+    fields['vad'].on_value_change(lambda _: update_parameter_controls())
+    fields['device'].on_value_change(lambda _: update_parameter_controls())
+    update_parameter_controls()
+
     if include_paths:
         fields['cache_dir'] = ui.input('Katalog modeli', value=settings.cache_dir).classes('w-full').props('outlined')
         fields['output_dir'] = ui.input('Katalog eksportów', value=settings.output_dir).classes('w-full').props('outlined')
@@ -132,8 +312,11 @@ def form_values(fields, original):
 
 
 class Interface:
-    def __init__(self, db, models, queue, recorder):
+    def __init__(self, db, models, queue, recorder, captions):
         self.db, self.model_manager, self.tasks, self.recorder = db, models, queue, recorder
+        self.captions_service = captions
+        self.owner_id = ui.context.client.id
+        ui.context.client.on_disconnect(lambda: self.captions_service.stop(self.owner_id, finish=False))
         self.timers = []
         self.tracked = set()
         self.staged = []
@@ -161,6 +344,8 @@ class Interface:
         self.timers.append(ui.timer(seconds, callback))
 
     def navigate(self, key, job_id=None):
+        if self.page == 'captions' and key != 'captions':
+            self.captions_service.stop(self.owner_id, finish=False)
         for timer in self.timers:
             timer.cancel()
         self.timers.clear()
@@ -184,7 +369,8 @@ class Interface:
             elif job['status'] == 'done':
                 self.tracked.discard(job_id)
                 ui.notify('Transkrypcja jest gotowa.', type='positive')
-                self.navigate('editor', job_id)
+                if self.page != 'captions':
+                    self.navigate('editor', job_id)
                 break
 
     def dashboard(self):
@@ -225,24 +411,36 @@ class Interface:
                     ui.label('Dodaj plik audio lub wideo, wybierz model i rozpocznij pracę.').classes('muted')
                 ui.button('Nowa transkrypcja', icon='add', on_click=lambda: self.navigate('transcription')).props('unelevated no-caps')
 
-        def refresh():
-            stats = gpu_stats()
-            gpu.set_text(stats.get('name', 'Niedostępna').replace('NVIDIA GeForce ', ''))
-            gpu_sub.set_text(f"Obciążenie {stats.get('utilization', '—')}% · {stats.get('temperature', '—')}°C" if 'error' not in stats else stats['error'])
+        async def refresh():
+            jobs = self.db.list()
+            active = next((j for j in jobs if j['status'] in ('downloading', 'preparing', 'transcribing', 'exporting')), None)
+            selected_id = dashboard_gpu_id(jobs, self.db.settings(), self.tasks.gpu_engine.loaded_gpu)
+            stats = await run.io_bound(gpu_stats, selected_id)
+            if gpu.is_deleted:
+                return
+            if 'error' in stats:
+                gpu.set_text('Niedostępna')
+                gpu_sub.set_text(stats['error'])
+            else:
+                name = stats.get('name', 'GPU').replace('NVIDIA GeForce ', '')
+                gpu.set_text(f"CUDA {stats['index']} · {name}")
+                utilization = stats.get('utilization')
+                temperature = stats.get('temperature')
+                gpu_sub.set_text(f"Obciążenie {str(utilization) + '%' if utilization is not None else '—'} · {str(temperature) + '°C' if temperature is not None else '—'}")
             vram.set_text(human_size(stats.get('memory_used')))
             vram_sub.set_text('z ' + human_size(stats.get('memory_total')))
-            jobs = self.db.list()
             waiting.set_text(str(sum(j['status'] == 'waiting' for j in jobs)))
             waiting_sub.set_text('oczekujących nagrań')
             completed.set_text(str(sum(j['status'] == 'done' for j in jobs)))
             completed_sub.set_text('w historii')
-            active = next((j for j in jobs if j['status'] in ('downloading', 'preparing', 'transcribing', 'exporting')), None)
             activity.set_text(f"{active['name']} · {STATUS[active['status']]}" if active else 'Brak aktywnych zadań')
             bar.value = active['progress'] or 0 if active else 0
             activity_eta.set_text(eta_text(active) if active else '')
             active_job['id'] = active['id'] if active else None
             preview.set_enabled(bool(active))
-            resources.set_text(f"RAM: {human_size(psutil.virtual_memory().used)} / {human_size(psutil.virtual_memory().total)}\nZaładowany model GPU: {self.tasks.gpu_engine.loaded_name or 'brak'}")
+            loaded = self.tasks.gpu_engine.loaded_gpu
+            gpu_suffix = f" · CUDA {loaded['index']}" if loaded else ''
+            resources.set_text(f"RAM: {human_size(psutil.virtual_memory().used)} / {human_size(psutil.virtual_memory().total)}\nZaładowany model GPU: {self.tasks.gpu_engine.loaded_name or 'brak'}{gpu_suffix}")
         self.timer(2, refresh)
 
     def transcription(self):
@@ -251,6 +449,7 @@ class Interface:
         with ui.card().classes('panel w-full'):
             ui.label('1  ·  Wybierz nagrania').classes('section-title')
             ui.label('MP3, WAV, FLAC, M4A, AAC, OGG, OPUS, MP4, MKV, MOV, AVI lub WEBM').classes('hint')
+            ui.label('Z wideo zostanie zapisane audio; lokalna kopia wideo zostanie usunięta. Oryginał pozostaje na dysku.').classes('hint')
             files_area = ui.column().classes('w-full gap-1')
 
             def refresh_files():
@@ -260,11 +459,17 @@ class Interface:
                         ui.label(f"{item['name']}  ·  {human_size(item['size'])}  ·  {short_time(item['duration'])}").classes('text-sm')
             async def upload(e):
                 try:
-                    target, size, duration = await run.io_bound(store_upload, e.content, e.name, settings.max_upload_gb * 1024**3)
+                    if Path(e.name).suffix.lower() in VIDEO_EXTENSIONS:
+                        ui.notify('Przygotowywanie audio z wideo…')
+                    target, size, duration, warning = await run.io_bound(store_upload, e.content, e.name, settings.max_upload_gb * 1024**3)
                     self.staged.append({'name': Path(e.name).name, 'path': str(target), 'size': size, 'duration': duration})
                     refresh_files()
+                    if warning:
+                        ui.notify(warning, type='warning', timeout=10000)
                 except Exception as exc:
                     ui.notify(str(exc), type='negative', timeout=8000)
+                finally:
+                    e.content.close()
             ui.upload(label='Przeciągnij pliki tutaj lub wybierz z dysku', multiple=True, auto_upload=True,
                       max_file_size=settings.max_upload_gb * 1024**3, on_upload=upload,
                       on_rejected=lambda: ui.notify('Plik przekracza limit lub został odrzucony.', type='negative')).classes('w-full').props('accept=".mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.mp4,.mkv,.mov,.avi,.webm"')
@@ -287,6 +492,135 @@ class Interface:
                 except Exception as exc:
                     ui.notify(str(exc), type='negative')
             ui.button('Dodaj do kolejki', icon='arrow_forward', on_click=submit).props('unelevated no-caps').classes('q-mt-md')
+
+    def captions(self):
+        header('Napisy na żywo', 'Lokalna transkrypcja dźwięku z mikrofonu w języku wypowiedzi.')
+        settings = self.db.settings()
+        try:
+            devices = self.captions_service.devices()
+        except Exception as exc:
+            devices = {}
+            ui.label(f'Nie można odczytać mikrofonów: {exc}').classes('text-negative')
+        default_device = self.captions_service.default_device()
+        if default_device not in devices:
+            default_device = next(iter(devices), None)
+        with ui.card().classes('panel w-full'):
+            ui.label('Źródło i ustawienia').classes('section-title')
+            ui.label('Dźwięk jest przetwarzany lokalnie i nie jest zapisywany. Opuszczenie zakładki lub zamknięcie karty zatrzymuje mikrofon.').classes('hint')
+            with ui.row().classes('w-full gap-4 items-start'):
+                microphone = ui.select(devices, label='Mikrofon', value=default_device).classes('grow min-w-44').props('outlined')
+                model = ui.select({name: name for name in MODEL_REPOS}, label='Model Whisper', value=settings.model).classes('grow min-w-44').props('outlined')
+                language = ui.select({'': 'Wykryj automatycznie', 'pl': 'Polski', 'en': 'Angielski', 'de': 'Niemiecki',
+                                      'es': 'Hiszpański', 'fr': 'Francuski', 'uk': 'Ukraiński'},
+                                     label='Język mowy', value=settings.language).classes('grow min-w-44').props('outlined')
+                interval = ui.select({3: '3 sekundy', 5: '5 sekund', 8: '8 sekund', 10: '10 sekund'},
+                                     label='Długość porcji', value=5).classes('min-w-44').props('outlined')
+            with ui.row().classes('w-full gap-4 items-start'):
+                device = ui.select({'cuda': 'GPU · CUDA', 'cpu': 'CPU'}, label='Urządzenie', value=settings.device).classes('grow min-w-44').props('outlined')
+                gpu, set_gpu_enabled = gpu_picker(settings.gpu_id)
+                precision = ui.select({'auto': 'Automatyczna', 'float16': 'Float16', 'int8_float16': 'Int8/float16'},
+                                      label='Precyzja GPU', value=settings.compute_type).classes('grow min-w-44').props('outlined')
+                vad = ui.switch('Filtr ciszy VAD', value=settings.vad)
+                diarization = ui.switch('Rozróżniaj rozmówców', value=settings.diarization)
+            ui.label('Wybierz wcześniej pobrany model. Napisy pojawiają się po każdej porcji; szybkość zależy od modelu i komputera. Mniejsze modele zwykle zmniejszają opóźnienie.').classes('hint')
+            ui.label('Automatyczne wykrywanie języka działa osobno dla każdej porcji; przy krótkich wypowiedziach wybór języka ręcznie może być dokładniejszy.').classes('hint')
+            ui.label('W trybie GPU inne zadania GPU czekają na zakończenie sesji napisów. Nowa sesja zastępuje poprzedni tekst w pamięci.').classes('hint')
+            ui.label('Rozróżnianie rozmówców działa lokalnie na CPU i przy pierwszym użyciu pobiera około 46 MB modeli. Krótkie lub nakładające się głosy mogą być oznaczone błędnie.').classes('hint')
+            with ui.row().classes('w-full items-center gap-3 q-mt-sm'):
+                status = ui.label('Gotowość').classes('font-medium')
+                level = ui.linear_progress(value=0, show_value=False, color='red-4').classes('w-40')
+                start = ui.button('Uruchom napisy', icon='mic', color='primary').props('unelevated no-caps')
+                stop = ui.button('Zatrzymaj', icon='stop', color='negative').props('outline no-caps')
+            warning = ui.label('').classes('text-warning text-sm')
+
+        with ui.card().classes('panel w-full q-mt-md'):
+            with ui.row().classes('w-full items-center justify-between'):
+                ui.label('Napisy').classes('section-title')
+                with ui.row():
+                    copy = ui.button('Kopiuj całość', icon='content_copy').props('flat no-caps')
+                    download = ui.button('Pobierz TXT', icon='download').props('flat no-caps')
+            ui.label('Widok pokazuje ostatnie 50 fragmentów; kopiowanie i pobieranie obejmują całą bieżącą sesję.').classes('hint')
+            with ui.scroll_area().classes('live-feed w-full').style('height: 320px') as scroll:
+                output = ui.label('Tutaj pojawią się napisy.').classes('live-caption-text w-full')
+
+        last_revision = {'value': None}
+        controls = (microphone, model, language, interval, device, vad, diarization)
+
+        def update_controls(active):
+            for control in controls:
+                control.set_enabled(not active)
+            precision.set_enabled(not active and device.value == 'cuda')
+            set_gpu_enabled(not active and device.value == 'cuda')
+
+        def start_live():
+            try:
+                if microphone.value is None:
+                    raise ValueError('Nie znaleziono mikrofonu wejściowego.')
+                options = Settings.model_validate({**settings.model_dump(), 'task': 'transcribe',
+                    'model': model.value, 'language': language.value, 'device': device.value,
+                    'gpu_id': gpu.value or '', 'compute_type': precision.value if device.value == 'cuda' else 'auto',
+                    'vad': vad.value, 'diarization': diarization.value})
+                self.captions_service.start(int(microphone.value), options, int(interval.value), self.owner_id)
+                refresh()
+            except Exception as exc:
+                ui.notify(str(exc), type='negative', timeout=8000)
+
+        def stop_live():
+            self.captions_service.stop(self.owner_id, finish=True)
+            refresh()
+
+        def copy_text():
+            ui.clipboard.write(self.captions_service.transcript())
+            ui.notify('Skopiowano napisy.')
+
+        def download_text():
+            text = self.captions_service.transcript()
+            ui.download((text + '\n').encode('utf-8'), filename='napisy-na-zywo.txt', media_type='text/plain; charset=utf-8')
+
+        start.on_click(start_live)
+        stop.on_click(stop_live)
+        copy.on_click(copy_text)
+        download.on_click(download_text)
+
+        def refresh():
+            current = self.captions_service.snapshot()
+            active = current['phase'] in ('preparing', 'preparing_speakers', 'waiting_gpu', 'listening', 'stopping')
+            own = current['owner'] == self.owner_id
+            messages = {'idle': 'Gotowość', 'preparing': 'Ładowanie modelu…',
+                        'preparing_speakers': 'Przygotowywanie modeli rozmówców…',
+                        'waiting_gpu': 'Oczekiwanie na dostęp do GPU…', 'listening': 'Mikrofon włączony · napisy na żywo',
+                        'stopping': 'Zatrzymywanie mikrofonu · kończenie napisów…', 'stopped': 'Zatrzymano', 'error': 'Błąd'}
+            message = messages.get(current['phase'], current['phase'])
+            if active and not own:
+                message = 'Sesja napisów jest uruchomiona w innej karcie.'
+            if current['error']:
+                message = f"Błąd: {current['error']}"
+            status.set_text(message)
+            status.classes(add='live-microphone-active' if current['phase'] == 'listening' else '',
+                           remove='' if current['phase'] == 'listening' else 'live-microphone-active')
+            level.value = current['level']
+            start.set_enabled(bool(devices) and not active)
+            stop.set_enabled(active and own and current['phase'] != 'stopping')
+            copy.set_enabled(bool(current['line_count']))
+            download.set_enabled(bool(current['line_count']))
+            update_controls(active)
+            notes = []
+            if current['pending']:
+                notes.append(f"Oczekujące porcje: {current['pending']}")
+            if current['dropped_seconds']:
+                notes.append(f"Pominięto około {current['dropped_seconds']:.1f} s dźwięku — wybierz mniejszy model lub sprawdź obciążenie komputera.")
+            if current['input_warnings']:
+                notes.append('Mikrofon zgłosił zakłócenia wejścia; część dźwięku mogła zostać utracona.')
+            warning.set_text(' · '.join(notes))
+            if current['revision'] != last_revision['value']:
+                last_revision['value'] = current['revision']
+                output.set_text(current['text'] or 'Tutaj pojawią się napisy.')
+                if current['text']:
+                    scroll.scroll_to(percent=1)
+
+        device.on_value_change(lambda _: refresh())
+        refresh()
+        self.timer(.4, refresh)
 
     def recording(self):
         header('Nagrywanie', 'Nagraj dźwięk z mikrofonu podłączonego do tego komputera.')
@@ -442,8 +776,8 @@ class Interface:
                     empty.set_visibility(False)
                     lines = []
                     for row in rows:
-                        lines.append(f"[{short_time(row['start'])}] {row['text']}")
-                        texts.append(row['text'])
+                        lines.append(f"[{short_time(row['start'])}] {segment_text(row)}")
+                        texts.append(segment_text(row))
                     last_sequence = rows[-1]['sequence']
                     with feed:
                         ui.label('\n'.join(lines)).classes('w-full whitespace-pre-wrap break-words')
@@ -511,43 +845,86 @@ class Interface:
                 with ui.row().classes('w-full model-row items-center no-wrap') as model_row:
                     with ui.column().classes('grow gap-0'):
                         ui.label(name).classes('font-medium text-base')
-                        info = ui.label('').classes('hint')
-                        bar = ui.linear_progress(value=0, show_value=False).classes('w-full')
+                        info = ui.label('').classes('model-info')
+                        bar = ui.linear_progress(value=0, size='7px', show_value=False, color='light-blue-5').classes('w-full q-mt-xs').props('rounded')
                     with ui.row().classes('model-badge items-center no-wrap') as badge:
                         badge_icon = ui.icon('cloud_download', size='17px')
                         badge_text = ui.label('NIEPOBRANY')
                     download = ui.button('Pobierz', icon='download', on_click=lambda _, n=name: self.models_start(n, settings)).props('flat no-caps')
+                    def cancel(_, n=name):
+                        self.models_cancel(n, settings)
+                        refresh()
+                    cancel_button = ui.button('Anuluj', icon='cancel', on_click=cancel, color='negative').props('flat no-caps')
                     async def remove(n=name):
                         try:
                             active = self.db.list(('downloading', 'preparing', 'transcribing', 'exporting'))
                             if any(Settings.model_validate_json(j['options']).model == n for j in active):
                                 raise RuntimeError('Model jest używany przez aktywne zadanie.')
+                            if self.captions_service.using_model(n, settings.cache_dir):
+                                raise RuntimeError('Model jest używany przez napisy na żywo.')
                             await run.io_bound(self.tasks.gpu_engine.unload)
                             await run.io_bound(self.model_manager.delete, n, settings.cache_dir)
                             ui.notify('Usunięto model.', type='positive')
                         except Exception as exc:
                             ui.notify(str(exc), type='negative')
                     delete = ui.button(icon='delete_outline', on_click=remove).props('flat round').tooltip('Usuń model')
-                    elements[name] = (model_row, info, bar, badge, badge_icon, badge_text, download, delete)
+                    elements[name] = (model_row, info, bar, badge, badge_icon, badge_text, download, cancel_button, delete)
+            labels = {
+                'missing': ('NIEPOBRANY', 'cloud_off', 'Pobierz', 'download'),
+                'partial': ('NIEKOMPLETNY', 'cloud_sync', 'Wznów', 'play_arrow'),
+                'checking': ('SPRAWDZANIE', 'sync', 'Sprawdzanie…', 'sync'),
+                'downloading': ('POBIERANIE', 'sync', 'Pobieranie…', 'download'),
+                'cancelling': ('ANULOWANIE', 'sync', 'Anulowanie…', 'sync'),
+                'cancelled': ('ANULOWANO', 'cancel', 'Wznów', 'refresh'),
+                'ready': ('POBRANY · GOTOWY OFFLINE', 'check_circle', 'Pobrano', 'check'),
+                'error': ('BŁĄD POBIERANIA', 'error_outline', 'Ponów', 'refresh'),
+            }
+
             def refresh():
                 available_count = 0
-                for name, (row, info, bar, badge, icon, badge_text, button, delete) in elements.items():
+                for name, (row, info, bar, badge, icon, badge_text, button, cancel_button, delete) in elements.items():
                     detail = self.model_manager.details(name, settings.cache_dir)
-                    available = detail['available']
-                    available_count += int(available)
-                    running = detail.get('status') in ('Pobieranie', 'Sprawdzanie plików')
-                    suffix = f" · {detail['status']}" if detail.get('status') and detail['status'] != 'Pobrano' else ''
-                    if detail.get('total'):
-                        suffix += f" {human_size(detail.get('downloaded'))} / {human_size(detail['total'])}"
-                    info.set_text(f"Na dysku: {human_size(detail['size'])} · rozmiar modelu {detail['estimated']}" + suffix)
-                    row.classes(add='ready' if available else '', remove='' if available else 'ready')
-                    badge.classes(add='ready' if available else '', remove='' if available else 'ready')
-                    icon.set_name('check_circle' if available else 'cloud_download')
-                    badge_text.set_text('POBRANY · GOTOWY OFFLINE' if available else ('POBIERANIE' if running else 'NIEPOBRANY'))
-                    bar.value = (detail.get('downloaded') or 0) / detail['total'] if detail.get('total') else 0
-                    bar.set_visibility(bool(running and detail.get('total')))
-                    button.set_text('Pobrano' if available else 'Pobierz')
-                    button.set_enabled(not available and not running)
+                    state = model_state(detail)
+                    available_count += int(state == 'ready')
+                    running = state in ('checking', 'downloading', 'cancelling')
+                    color = 'downloading' if running else 'partial' if state == 'cancelled' else state
+                    label, icon_name, button_text, button_icon = labels[state]
+                    total = detail.get('total') or 0
+                    downloaded = detail.get('downloaded') or 0
+                    progress = min(1.0, max(0.0, downloaded / total)) if total else 0.0
+                    info_text = f"Na dysku: {human_size(detail['size'])} · rozmiar modelu {detail['estimated']}"
+                    if state == 'checking':
+                        info_text += ' · Sprawdzanie plików…'
+                    elif state == 'downloading':
+                        if total:
+                            percent = f'{progress * 100:.1f}'.replace('.', ',')
+                            label += f' · {percent}%'
+                            info_text += f" · Pobrano {human_size(downloaded)} z {human_size(total)}"
+                        else:
+                            info_text += ' · Pobieranie; całkowity rozmiar nie jest jeszcze znany'
+                    elif state == 'partial':
+                        info_text += ' · Pobieranie nie zostało ukończone'
+                    elif state == 'cancelling':
+                        info_text += ' · Trwa zatrzymywanie pobierania…'
+                    elif state == 'cancelled':
+                        info_text += ' · Pobieranie anulowane; możesz je wznowić'
+                    elif state == 'error':
+                        info_text += f" · {detail['status']}"
+                    info.set_text(info_text)
+                    other_colors = ' '.join(item for item in ('missing', 'partial', 'downloading', 'ready', 'error') if item != color)
+                    row.classes(add=color, remove=other_colors)
+                    badge.classes(add=color, remove=other_colors)
+                    icon.set_name(icon_name)
+                    icon.classes(add='model-spin' if running else '', remove='' if running else 'model-spin')
+                    badge_text.set_text(label)
+                    bar.value = progress
+                    bar.props(add='indeterminate' if running and not total else '', remove='' if running and not total else 'indeterminate')
+                    bar.set_visibility(running)
+                    button.set_text(button_text)
+                    button.props(f'icon={button_icon}')
+                    button.set_enabled(not running and state != 'ready')
+                    cancel_button.set_visibility(running)
+                    cancel_button.set_enabled(state != 'cancelling')
                     delete.set_enabled(bool(detail['size']) and not running)
                 summary.set_text(f'Pobrane: {available_count} z {len(elements)} modeli')
             refresh()
@@ -557,6 +934,12 @@ class Interface:
         self.model_manager.start_download(name, settings.cache_dir)
         ui.notify(f'Pobieranie modelu {name} rozpoczęte.')
 
+    def models_cancel(self, name, settings):
+        if self.model_manager.cancel_download(name, settings.cache_dir):
+            ui.notify(f'Anulowanie pobierania modelu {name}…')
+        else:
+            ui.notify('To pobieranie już się zakończyło.')
+
     def editor(self, job_id):
         job = self.db.get(job_id)
         if not job or not job['result']:
@@ -565,7 +948,10 @@ class Interface:
         result = json.loads(job['result'])
         header('Edytor transkrypcji', job['name'])
         with ui.row().classes('w-full gap-3 items-center q-mb-md'):
-            ui.label(f"{result.get('model', '—')} · {result.get('device', '—').upper()} · {result.get('language', '—')} · RTF {result.get('rtf', 0) or 0:.2f}").classes('hint grow')
+            device_text = result.get('device', '—').upper()
+            if result.get('gpu_name'):
+                device_text += f" {result.get('gpu_index')} · {result['gpu_name']}"
+            ui.label(f"{result.get('model', '—')} · {device_text} · {result.get('language', '—')} · RTF {result.get('rtf', 0) or 0:.2f}").classes('hint grow')
             for fmt in ('txt', 'srt', 'vtt', 'json', 'csv'):
                 ui.button(fmt.upper(), on_click=lambda _, f=fmt: ui.download(f'/export/{job_id}/{f}')).props('outline no-caps dense')
             async def reexport():
@@ -577,39 +963,84 @@ class Interface:
                     ui.notify(str(exc), type='negative')
             ui.button('Ponów eksport', icon='save_alt', on_click=reexport).props('flat no-caps')
         with ui.card().classes('panel w-full'):
-            ext = Path(job['name']).suffix.lower()
-            player = ui.video(f'/media/{job_id}').classes('w-full') if ext in ('.mp4', '.mkv', '.mov', '.avi', '.webm') else ui.audio(f'/media/{job_id}').classes('w-full')
+            media_path = Path(job['path'])
+            if media_path.is_file():
+                player = (ui.video(f'/media/{job_id}') if media_path.suffix.lower() in VIDEO_EXTENSIONS
+                          else ui.audio(f'/media/{job_id}')).classes('w-full')
+            else:
+                player = None
+                ui.label('Nie znaleziono pliku nagrania w zapisanej lokalizacji. Transkrypcję można nadal edytować i eksportować.').classes('text-warning')
             with ui.row().classes('w-full items-center'):
                 search = ui.input(placeholder='Szukaj w transkrypcji…').props('outlined dense clearable').classes('grow')
                 def copy():
                     current = json.loads(self.db.get(job_id)['result'])
-                    ui.clipboard.write('\n'.join(s['text'] for s in current['segments']))
+                    ui.clipboard.write('\n'.join(segment_text(s) for s in current['segments']))
                     ui.notify('Skopiowano transkrypcję.')
                 ui.button('Kopiuj całość', icon='content_copy', on_click=copy).props('flat no-caps')
             ui.label('Zmiany zapisują się automatycznie. Kliknij znacznik czasu, aby przejść do fragmentu.').classes('hint')
+            speaker_edit = ui.switch('Edytuj rozmówców', value=bool(result.get('diarization') or any(s.get('speaker') for s in result['segments'])))
+            state = {'page': 1}
+
+            def change_page(event):
+                page = int(event.value or 1)
+                if page != state['page']:
+                    state['page'] = page
+                    draw()
+
+            with ui.row().classes('w-full items-center justify-between'):
+                summary = ui.label('').classes('hint')
+                top_pager = ui.pagination(1, 1, value=1, direction_links=True, on_change=change_page).props('max-pages=7 boundary-numbers')
             rows = ui.column().classes('w-full gap-0')
+            bottom_pager = ui.pagination(1, 1, value=1, direction_links=True, on_change=change_page).props('max-pages=7 boundary-numbers')
+
             def draw():
                 rows.clear()
                 current = json.loads(self.db.get(job_id)['result'])
                 query = (search.value or '').casefold()
+                matches = [(index, segment) for index, segment in enumerate(current['segments'])
+                           if query in segment['text'].casefold() or query in (segment.get('speaker') or '').casefold()]
+                pages = max(1, (len(matches) + EDITOR_PAGE_SIZE - 1) // EDITOR_PAGE_SIZE)
+                state['page'] = min(max(1, state['page']), pages)
+                start = (state['page'] - 1) * EDITOR_PAGE_SIZE
+                end = min(start + EDITOR_PAGE_SIZE, len(matches))
+                summary.set_text(f'Fragmenty {start + 1}–{end} z {len(matches)}' if matches else 'Brak pasujących fragmentów.')
+                for pager in (top_pager, bottom_pager):
+                    pager.max = pages
+                    if pager.value != state['page']:
+                        pager.value = state['page']
+                    pager.set_visibility(pages > 1)
                 with rows:
-                    for index, segment in enumerate(current['segments']):
-                        if query not in segment['text'].casefold():
-                            continue
+                    for index, segment in matches[start:end]:
                         with ui.row().classes('w-full job-row no-wrap items-start'):
                             def seek(second=segment['start']):
-                                player.seek(float(second))
-                                player.play()
-                            ui.button(short_time(segment['start']), on_click=seek).props('flat no-caps dense').classes('text-primary')
+                                if player:
+                                    player.seek(float(second))
+                                    player.play()
+                            seek_button = ui.button(short_time(segment['start']), on_click=seek).props('flat no-caps dense').classes('text-primary')
+                            seek_button.set_enabled(player is not None)
+                            if speaker_edit.value:
+                                def save_speaker(e, idx=index):
+                                    try:
+                                        self.db.edit_speaker(job_id, idx, e.value or '')
+                                    except Exception as exc:
+                                        ui.notify(str(exc), type='negative')
+                                ui.input(value=segment.get('speaker') or '', placeholder='Nieustalony',
+                                         on_change=save_speaker).classes('w-40').props('outlined dense maxlength=80')
                             def save(e, idx=index):
                                 try:
                                     self.db.edit_segment(job_id, idx, e.value or '')
                                 except Exception as exc:
                                     ui.notify(str(exc), type='negative')
-                            ui.textarea(value=segment['text'], on_change=save).classes('grow').props('outlined autogrow debounce=700')
+                            ui.textarea(value=segment['text'], on_change=save).classes('grow').props('outlined autogrow')
                             if segment.get('words'):
                                 ui.label(' '.join(f"{w['word'].strip()} [{short_time(w['start'])}]" for w in segment['words'])).classes('hint')
-            search.on_value_change(lambda _: draw())
+
+            def search_changed(_):
+                state['page'] = 1
+                draw()
+
+            search.on_value_change(search_changed)
+            speaker_edit.on_value_change(lambda _: draw())
             draw()
 
     def settings(self):
@@ -633,23 +1064,32 @@ class Interface:
         header('Diagnostyka', 'Sprawdź zgodność środowiska i wykonaj rzeczywistą inferencję na GPU.')
         with ui.card().classes('panel w-full'):
             ui.label('Środowisko').classes('section-title')
+            gpu, _ = gpu_picker(self.db.settings().gpu_id)
             summary = ui.label('Odczytywanie informacji…').classes('whitespace-pre-wrap text-sm w-full break-all')
+            revision = {'value': 0}
             async def refresh():
-                data = await run.io_bound(diagnostics)
-                summary.set_text(json.dumps(data, ensure_ascii=False, indent=2))
+                revision['value'] += 1
+                request = revision['value']
+                data = await run.io_bound(diagnostics, gpu.value or '')
+                if not summary.is_deleted and revision['value'] == request:
+                    summary.set_text(json.dumps(data, ensure_ascii=False, indent=2))
             async def test_gpu():
+                revision['value'] += 1
+                request = revision['value']
                 summary.set_text('Trwa rzeczywisty test Faster-Whisper na CUDA…')
                 settings = self.db.settings()
                 path = self.model_manager.path('tiny', settings.cache_dir)
                 if not self.model_manager.available('tiny', settings.cache_dir):
                     summary.set_text('Brak modelu tiny. Pobierz go w zakładce Modele AI, a następnie ponów test.')
                     return
-                result = await run.io_bound(inference_test, path)
-                summary.set_text(json.dumps(result, ensure_ascii=False, indent=2))
-                ui.notify('Test GPU zakończony.' if result.get('ok') else 'Test GPU nie powiódł się. Sprawdź szczegóły.', type='positive' if result.get('ok') else 'negative')
+                result = await run.io_bound(inference_test, path, gpu_id=gpu.value or '')
+                if not summary.is_deleted and revision['value'] == request:
+                    summary.set_text(json.dumps(result, ensure_ascii=False, indent=2))
+                    ui.notify('Test GPU zakończony.' if result.get('ok') else 'Test GPU nie powiódł się. Sprawdź szczegóły.', type='positive' if result.get('ok') else 'negative')
             with ui.row():
                 ui.button('Odśwież', icon='refresh', on_click=refresh).props('outline no-caps')
                 ui.button('Uruchom test CUDA', icon='play_arrow', on_click=test_gpu).props('unelevated no-caps')
+            gpu.on_value_change(lambda _: refresh())
             self.timers.append(ui.timer(.1, refresh, once=True))
         from app.config import LOGS
         with ui.expansion('Ostatnie wpisy dziennika', icon='article').classes('w-full q-mt-md'):

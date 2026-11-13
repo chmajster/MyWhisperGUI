@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 import uuid
 
@@ -6,7 +7,58 @@ import numpy as np
 
 from app.config import UPLOADS
 
-EXTENSIONS = {'.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.mp4', '.mkv', '.mov', '.avi', '.webm'}
+VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.mov', '.avi', '.webm'}
+EXTENSIONS = {'.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus'} | VIDEO_EXTENSIONS
+
+
+def extract_video_audio(path):
+    """Write and verify the audio before the caller removes the uploaded video."""
+    path = Path(path)
+    audio_path = path.with_suffix('.flac')
+    sample_rate = 16000
+    samples_written = 0
+    created = False
+    try:
+        with audio_path.open('xb') as audio_file:
+            created = True
+            with av.open(str(path), mode='r') as source, av.open(audio_file, mode='w', format='flac') as output:
+                if not source.streams.audio:
+                    raise ValueError('Plik nie zawiera ścieżki audio.')
+                stream = output.add_stream('flac', rate=sample_rate)
+                stream.layout = 'mono'
+                resampler = av.AudioResampler(format='s16', layout='mono', rate=sample_rate)
+
+                def write_frame(frame):
+                    nonlocal samples_written
+                    samples_written += frame.samples
+                    frame.pts = None
+                    for packet in stream.encode(frame):
+                        output.mux(packet)
+
+                for frame in source.decode(audio=0):
+                    for converted in resampler.resample(frame):
+                        write_frame(converted)
+                for converted in resampler.resample(None):
+                    write_frame(converted)
+                if not samples_written:
+                    raise ValueError('Nagranie nie zawiera próbek audio.')
+                for packet in stream.encode(None):
+                    output.mux(packet)
+
+        # Decode the finished file before deleting its source; this also detects
+        # incomplete output and ensures it contains every sample we encoded.
+        with av.open(str(audio_path), mode='r') as check:
+            samples_read = sum(frame.samples for frame in check.decode(audio=0))
+        if samples_read != samples_written:
+            raise ValueError('Niekompletny plik audio po konwersji.')
+        return audio_path, audio_path.stat().st_size, samples_written / sample_rate
+    except Exception:
+        if created:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except OSError:
+                logging.exception('Nie można usunąć niekompletnego pliku audio: %s', audio_path)
+        raise
 
 
 def store_upload(file, name, max_bytes, directory=UPLOADS):
@@ -17,8 +69,10 @@ def store_upload(file, name, max_bytes, directory=UPLOADS):
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / (uuid.uuid4().hex + extension)
     count = 0
+    created = False
     try:
         with target.open('xb') as out:
+            created = True
             while True:
                 part = file.read(1024 * 1024)
                 if not part:
@@ -30,10 +84,25 @@ def store_upload(file, name, max_bytes, directory=UPLOADS):
         if not count:
             raise ValueError('Plik jest pusty.')
         duration = probe(target)
-        return target, count, duration
     except Exception:
-        target.unlink(missing_ok=True)
+        if created:
+            target.unlink(missing_ok=True)
         raise
+
+    if extension not in VIDEO_EXTENSIONS:
+        return target, count, duration, None
+
+    try:
+        audio, audio_size, audio_duration = extract_video_audio(target)
+    except Exception:
+        logging.exception('Nie można przekonwertować wideo na audio: %s', target)
+        return target, count, duration, 'Nie udało się przygotować audio. Zachowano lokalną kopię wideo do transkrypcji.'
+    try:
+        target.unlink()
+    except OSError:
+        logging.exception('Nie można usunąć lokalnej kopii wideo: %s', target)
+        return audio, audio_size, audio_duration, 'Audio jest gotowe, ale nie udało się usunąć lokalnej kopii wideo.'
+    return audio, audio_size, audio_duration, None
 
 
 def probe(path):

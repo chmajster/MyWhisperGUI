@@ -18,13 +18,25 @@ class Settings(BaseModel):
     model: Literal['tiny', 'base', 'small', 'medium', 'large-v3', 'turbo'] = 'large-v3'
     language: str = ''
     device: Literal['cuda', 'cpu'] = 'cuda'
+    gpu_id: str = Field(default='', max_length=128)
     compute_type: Literal['auto', 'float16', 'int8_float16'] = 'auto'
     task: Literal['transcribe', 'translate'] = 'transcribe'
     vad: bool = True
+    diarization: bool = False
     beam_size: int = Field(default=5, ge=1, le=10)
     temperature: float = Field(default=0.0, ge=0, le=1)
+    best_of: int = Field(default=5, ge=1, le=10)
+    patience: float = Field(default=1.0, ge=0.1, le=5.0)
+    repetition_penalty: float = Field(default=1.0, ge=1.0, le=3.0)
+    no_repeat_ngram_size: int = Field(default=0, ge=0, le=10)
+    no_speech_threshold: float = Field(default=0.6, ge=0, le=1)
+    condition_on_previous_text: bool = True
+    vad_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
+    vad_min_silence_ms: int = Field(default=2000, ge=100, le=10000)
+    vad_speech_pad_ms: int = Field(default=400, ge=0, le=1500)
     word_timestamps: bool = False
     initial_prompt: str = Field(default='', max_length=4000)
+    hotwords: str = Field(default='', max_length=4000)
     cache_dir: str = str(ROOT / 'models')
     output_dir: str = str(ROOT / 'output')
     theme: Literal['dark', 'light'] = 'dark'

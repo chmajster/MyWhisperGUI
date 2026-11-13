@@ -7,6 +7,8 @@ import time
 from app.config import Settings
 from app.core.audio_processor import probe
 from app.core.exporter import export_all
+from app.core.model_manager import DownloadCancelled
+from app.core.speaker_diarization import SpeakerCancelled, SpeakerDiarizer
 from app.core.whisper_engine import Cancelled, WhisperEngine
 
 
@@ -37,11 +39,11 @@ class TaskQueue:
             self.threads.append(worker)
             worker.start()
 
-    def stop(self):
+    def stop(self, *, unload_gpu=True):
         self.stop_event.set()
         for worker in self.threads:
             worker.join(timeout=5)
-        if not any(worker.is_alive() for worker in self.threads):
+        if unload_gpu and not any(worker.is_alive() for worker in self.threads):
             self.gpu_engine.unload()
 
     def _worker(self, index):
@@ -85,6 +87,11 @@ class TaskQueue:
             duration = probe(job['path'])
             self.db.update(job_id, duration=duration, progress=0 if duration else None)
 
+            speaker_tracker = None
+            if options.diarization:
+                self.db.update(job_id, message='Przygotowywanie modeli rozmówców (pierwsze użycie: około 46 MB)')
+                speaker_tracker = SpeakerDiarizer(options.cache_dir, cancelled)
+
             inference_started = None
             sequence = 0
 
@@ -115,8 +122,9 @@ class TaskQueue:
                 if cancelled():
                     raise Cancelled()
                 self.db.update(job_id, status='transcribing', message='')
+                extra = {'speaker_tracker': speaker_tracker} if speaker_tracker else {}
                 result = engine.transcribe(job['path'], options, progress, cancelled,
-                                           on_segment=on_segment, on_started=started_inference)
+                                           on_segment=on_segment, on_started=started_inference, **extra)
             finally:
                 if acquired:
                     self.gpu_slot.release()
@@ -130,9 +138,14 @@ class TaskQueue:
                 raise Cancelled()
             if not self.db.complete(job_id, result, elapsed):
                 raise Cancelled()
-        except Cancelled:
+        except (Cancelled, DownloadCancelled, SpeakerCancelled) as exc:
             status = 'error' if self.stop_event.is_set() else 'cancelled'
-            message = 'Przerwano zamykanie aplikacji. Można ponowić.' if status == 'error' else 'Anulowano.'
+            if status == 'error':
+                message = 'Przerwano zamykanie aplikacji. Można ponowić.'
+            elif isinstance(exc, DownloadCancelled):
+                message = 'Pobieranie modelu anulowano. Można ponowić zadanie.'
+            else:
+                message = 'Anulowano.'
             self.db.update(job_id, status=status, message=message, eta_seconds=None, elapsed=time.monotonic()-started)
         except Exception as exc:
             logging.exception('Błąd zadania %s', job_id)

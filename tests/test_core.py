@@ -21,7 +21,8 @@ FIXTURE = Path(__file__).parent / 'fixtures' / 'jfk.flac'
 
 def test_audio_import_and_incremental_decode(tmp_path):
     with FIXTURE.open('rb') as stream:
-        stored, size, duration = store_upload(stream, '../../mowa.flac', 2_000_000, tmp_path)
+        stored, size, duration, warning = store_upload(stream, '../../mowa.flac', 2_000_000, tmp_path)
+    assert warning is None
     assert stored.parent == tmp_path
     assert stored.name != 'mowa.flac'
     assert size == FIXTURE.stat().st_size

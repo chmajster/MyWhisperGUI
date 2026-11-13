@@ -158,6 +158,19 @@ class Database:
                 conn.execute('UPDATE jobs SET result=?,updated_at=? WHERE id=?',
                              (json.dumps(result, ensure_ascii=False), now(), job_id))
 
+    def edit_speaker(self, job_id, index, speaker):
+        speaker = speaker.strip()
+        if len(speaker) > 80:
+            raise ValueError('Nazwa rozmówcy może mieć najwyżej 80 znaków.')
+        with self.lock, self.connect() as conn:
+            row = conn.execute("SELECT result FROM jobs WHERE id=? AND status='done'", (job_id,)).fetchone()
+            if not row or not row['result']:
+                raise ValueError('Nie znaleziono wyniku.')
+            result = json.loads(row['result'])
+            result['segments'][index]['speaker'] = speaker or None
+            conn.execute('UPDATE jobs SET result=?,updated_at=? WHERE id=?',
+                         (json.dumps(result, ensure_ascii=False), now(), job_id))
+
     def delete(self, job_id):
         with self.lock, self.connect() as conn:
             changed = conn.execute("DELETE FROM jobs WHERE id=? AND status IN ('done','error','cancelled')", (job_id,)).rowcount

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 import time
 
 from app.config import DATA, LOGS, RECORDINGS, UPLOADS
@@ -23,6 +24,7 @@ from nicegui import app, ui
 
 from app.core.exporter import render
 from app.core.gpu_manager import configure_cuda_dlls
+from app.core.live_captions import LiveCaptions
 from app.core.model_manager import ModelManager
 from app.core.recorder import Recorder
 from app.core.task_queue import TaskQueue
@@ -33,7 +35,9 @@ configure_cuda_dlls()
 db = Database()
 models = ModelManager()
 queue = TaskQueue(db, models)
-recorder = Recorder()
+microphone_lock = threading.Lock()
+recorder = Recorder(microphone_lock)
+captions = LiveCaptions(models, queue, microphone_lock)
 
 
 class LocalOriginMiddleware:
@@ -107,7 +111,7 @@ def download(job_id: str, format: str):
 
 @ui.page('/')
 def index():
-    Interface(db, models, queue, recorder)
+    Interface(db, models, queue, recorder, captions)
 
 
 def startup():
@@ -130,7 +134,10 @@ def shutdown():
             recorder.stop()
         except Exception:
             logging.exception('Nie można zamknąć nagrywania')
-    queue.stop()
+    queue.stop_event.set()
+    captions_stopped = captions.shutdown()
+    models.cancel_all()
+    queue.stop(unload_gpu=captions_stopped)
 
 
 app.on_startup(startup)

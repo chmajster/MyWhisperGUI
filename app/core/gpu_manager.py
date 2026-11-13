@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 
@@ -48,30 +49,102 @@ def check_cuda_libraries():
                 raise RuntimeError(f'Brak wymaganej biblioteki {name}: {exc}. Uruchom repair.ps1.') from exc
 
 
-def gpu_stats():
+def _gpu_uuid(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if value.startswith(('GPU-', 'MIG-')):
+        return value
+    if re.fullmatch(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}', value):
+        return 'GPU-' + value
+    return None
+
+
+def cuda_devices():
+    """List CUDA ordinals as seen by CTranslate2, with stable UUIDs when available."""
+    configure_cuda_dlls()
+    import ctranslate2
+    count = ctranslate2.get_cuda_device_count()
+    if not count:
+        return []
     try:
-        import pynvml as nv
-        nv.nvmlInit()
-        try:
-            handle = nv.nvmlDeviceGetHandleByIndex(0)
-            mem = nv.nvmlDeviceGetMemoryInfo(handle)
+        import torch
+        torch_count = torch.cuda.device_count()
+    except Exception:
+        torch = None
+        torch_count = 0
+    devices = []
+    for index in range(count):
+        device = {'index': index, 'id': f'cuda:{index}', 'name': f'GPU CUDA {index}',
+                  'memory_total': None, 'capability': None}
+        if torch is not None and index < torch_count:
             try:
-                temperature = nv.nvmlDeviceGetTemperature(handle, nv.NVML_TEMPERATURE_GPU)
-            except nv.NVMLError:
-                temperature = None
-            return {'name': nv.nvmlDeviceGetName(handle), 'driver': nv.nvmlSystemGetDriverVersion(),
-                    'memory_total': mem.total, 'memory_used': mem.used,
-                    'utilization': nv.nvmlDeviceGetUtilizationRates(handle).gpu,
-                    'temperature': temperature}
-        finally:
-            nv.nvmlShutdown()
+                properties = torch.cuda.get_device_properties(index)
+                device['id'] = _gpu_uuid(getattr(properties, 'uuid', None)) or device['id']
+                device['name'] = str(properties.name)
+                device['memory_total'] = int(properties.total_memory)
+                device['capability'] = f'{properties.major}.{properties.minor}'
+            except Exception:
+                pass  # Keep the CUDA ordinal selectable when metadata is unavailable.
+        devices.append(device)
+    return devices
+
+
+def resolve_cuda_device(gpu_id='', devices=None):
+    devices = cuda_devices() if devices is None else devices
+    if not devices:
+        raise RuntimeError('Nie wykryto urządzenia CUDA. Sprawdź sterownik NVIDIA lub wybierz CPU.')
+    if not gpu_id:
+        return devices[0]
+    selected = next((device for device in devices if device['id'] == gpu_id), None)
+    if selected is None and re.fullmatch(r'cuda:\d+', gpu_id):
+        index = int(gpu_id[5:])
+        selected = next((device for device in devices if device['index'] == index), None)
+    if selected is None:
+        raise RuntimeError(f'Wybrana karta GPU ({gpu_id}) nie jest dostępna. Wybierz inną kartę w ustawieniach.')
+    return selected
+
+
+def gpu_stats(gpu_id=''):
+    try:
+        device = resolve_cuda_device(gpu_id)
     except Exception as exc:
         return {'error': str(exc)}
+    result = {**device, 'memory_used': None, 'utilization': None, 'temperature': None}
+    try:
+        import torch
+        free, total = torch.cuda.mem_get_info(device['index'])
+        result.update(memory_total=total, memory_used=total - free)
+    except Exception:
+        pass
+    # NVML's physical indexes do not necessarily match CUDA's visible ordinals.
+    # Only use a UUID match; never guess that the two indexes are equal.
+    if device['id'].startswith(('GPU-', 'MIG-')):
+        try:
+            import pynvml as nv
+            nv.nvmlInit()
+            try:
+                handle = nv.nvmlDeviceGetHandleByUUID(device['id'])
+                mem = nv.nvmlDeviceGetMemoryInfo(handle)
+                result.update(memory_total=mem.total, memory_used=mem.used, driver=nv.nvmlSystemGetDriverVersion())
+                try:
+                    result['utilization'] = nv.nvmlDeviceGetUtilizationRates(handle).gpu
+                except nv.NVMLError:
+                    pass
+                try:
+                    result['temperature'] = nv.nvmlDeviceGetTemperature(handle, nv.NVML_TEMPERATURE_GPU)
+                except nv.NVMLError:
+                    pass
+            finally:
+                nv.nvmlShutdown()
+        except Exception:
+            pass  # CUDA memory stats remain available even when NVML cannot map a GPU.
+    return result
 
 
-def diagnostics():
+def diagnostics(gpu_id=''):
     paths = configure_cuda_dlls()
-    result = {'python': platform.python_version(), 'gpu': gpu_stats(), 'dll_paths': [str(p) for p in paths]}
+    result = {'python': platform.python_version(), 'gpu': gpu_stats(gpu_id), 'dll_paths': [str(p) for p in paths]}
     for package in ('ctranslate2', 'faster-whisper', 'torch'):
         try:
             result[package] = importlib.metadata.version(package)
@@ -85,9 +158,12 @@ def diagnostics():
             result[name] = f'brak lub błąd ładowania: {exc}'
     try:
         import ctranslate2
-        result['cuda_devices'] = ctranslate2.get_cuda_device_count()
-        if result['cuda_devices']:
-            result['compute_types'] = sorted(ctranslate2.get_supported_compute_types('cuda', 0))
+        devices = cuda_devices()
+        result['cuda_devices'] = len(devices)
+        result['cuda_gpus'] = devices
+        if devices:
+            selected = resolve_cuda_device(gpu_id, devices)
+            result['compute_types'] = sorted(ctranslate2.get_supported_compute_types('cuda', selected['index']))
     except Exception as exc:
         result['cuda_error'] = str(exc)
     try:
@@ -95,7 +171,8 @@ def diagnostics():
         result['torch_cuda'] = torch.version.cuda
         result['torch_cuda_available'] = torch.cuda.is_available()
         if result['torch_cuda_available']:
-            result['capability'] = '.'.join(map(str, torch.cuda.get_device_capability(0)))
+            selected = resolve_cuda_device(gpu_id)
+            result['capability'] = '.'.join(map(str, torch.cuda.get_device_capability(selected['index'])))
             result['torch_architectures'] = torch.cuda.get_arch_list()
     except Exception as exc:
         result['torch_error'] = str(exc)
@@ -114,7 +191,7 @@ def friendly_error(exc):
     return message
 
 
-def inference_test(model_dir, audio_path=None, timeout=300):
+def inference_test(model_dir, audio_path=None, timeout=300, *, gpu_id=''):
     """Isolate native failures and confirm Faster-Whisper is actually run on CUDA."""
     command = [sys.executable, '-m', 'app.core.gpu_probe', str(model_dir)]
     sample = ROOT / 'tests' / 'fixtures' / 'polish.wav'
@@ -122,6 +199,7 @@ def inference_test(model_dir, audio_path=None, timeout=300):
         audio_path = sample
     if audio_path:
         command.append(str(audio_path))
+    command.extend(['--gpu-id', gpu_id])
     try:
         environment = os.environ.copy()
         environment['PYTHONIOENCODING'] = 'utf-8'
@@ -140,15 +218,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--download', action='store_true')
+    parser.add_argument('--gpu-id', default='', help='UUID GPU lub indeks CUDA, np. cuda:1')
     args = parser.parse_args()
-    data = diagnostics()
+    data = diagnostics(args.gpu_id)
     if args.test:
         from app.core.model_manager import ModelManager
         manager = ModelManager()
         try:
             if args.download and not manager.available('tiny', ROOT / 'models'):
                 manager.download('tiny', ROOT / 'models')
-            data['test_inferencji'] = inference_test(manager.path('tiny', ROOT / 'models'))
+            data['test_inferencji'] = inference_test(manager.path('tiny', ROOT / 'models'), gpu_id=args.gpu_id)
         except Exception as exc:
             data['test_inferencji'] = {'ok': False, 'error': friendly_error(exc)}
     print(json.dumps(data, indent=2, ensure_ascii=False))
