@@ -1,0 +1,40 @@
+# Środowiska i pliki generowane przez Pythona
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Lokalne dane aplikacji: historia, nagrania, modele, eksporty i dzienniki
+data/
+models/
+output/
+logs/
+*.log
+*.sqlite*
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Pliki środowiskowe mogą zawierać hasła lub tokeny
+.env
+.env.*
+!.env.example
+
+# Wagi modeli także poza domyślnym katalogiem models/
+model.bin
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
+*.onnx

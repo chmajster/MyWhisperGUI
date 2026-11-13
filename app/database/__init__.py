@@ -1,0 +1,1 @@
+"""Trwały stan aplikacji."""

@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "gpu: requires an NVIDIA RTX 5070 Ti, CUDA 12, cuDNN 9 and the downloaded tiny model",
+  "large_gpu: additionally requires the downloaded large-v3 model",
+  "ui: requires a running local application and exercises NiceGUI events over localhost",
+]
+addopts = "-ra"

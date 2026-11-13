@@ -1,0 +1,13 @@
+nicegui==2.24.2
+fastapi==0.115.14
+starlette==0.46.2
+faster-whisper==1.2.1
+ctranslate2==4.8.4
+huggingface-hub>=0.30,<1
+av>=14,<17
+numpy>=1.26,<3
+pydantic>=2.10,<3
+psutil>=6,<8
+nvidia-ml-py>=12,<14
+sounddevice>=0.5,<1
+pytest>=8,<10
