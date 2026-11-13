@@ -9,7 +9,7 @@ modeli. Po ich pobraniu transkrypcja i VAD działają offline.
 
 - Windows 10/11, 64-bitowy Python 3.11 lub 3.12 i odpowiednia ilość wolnego miejsca.
 - Do CUDA: aktualny sterownik NVIDIA, zgodny z kartą; na komputerze docelowym
-  sprawdzono RTX 5070 Ti, compute capability 12.0 i sterownik 621.14.
+  sprawdzono RTX 4070 Ti, compute capability 12.0 i sterownik 621.14.
 - Instalator pobiera m.in. duży pakiet PyTorch CUDA oraz model `tiny` do testu.
   Model domyślny `large-v3` zajmuje około 3 GB i jest pobierany przy pierwszym
   użyciu lub przez zakładkę **Modele AI**.
