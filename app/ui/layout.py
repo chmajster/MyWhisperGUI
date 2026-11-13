@@ -447,6 +447,19 @@ class Interface:
         header('Nowa transkrypcja', 'Dodaj nagrania i dostosuj sposób rozpoznawania mowy.')
         settings = self.db.settings()
         with ui.card().classes('panel w-full'):
+            ui.label('Czas pracy zadań').classes('section-title')
+            running_time = ui.label('Brak aktywnych zadań · Czas od uruchomienia: —').classes('hint whitespace-pre-line')
+            ui.label('Licznik rusza po rozpoczęciu zadania i obejmuje przygotowanie oraz pobieranie modelu.').classes('hint')
+
+        def refresh_running_time():
+            jobs = self.db.list(('downloading', 'preparing', 'transcribing', 'exporting'))
+            lines = [f"{job['name']} · {STATUS[job['status']]} · Czas od uruchomienia: {short_time(self.tasks.elapsed(job))}"
+                     for job in jobs]
+            running_time.set_text('\n'.join(lines) if lines else 'Brak aktywnych zadań · Czas od uruchomienia: —')
+
+        refresh_running_time()
+        self.timer(1, refresh_running_time)
+        with ui.card().classes('panel w-full q-mt-md'):
             ui.label('1  ·  Wybierz nagrania').classes('section-title')
             ui.label('MP3, WAV, FLAC, M4A, AAC, OGG, OPUS, MP4, MKV, MOV, AVI lub WEBM').classes('hint')
             ui.label('Z wideo zostanie zapisane audio; lokalna kopia wideo zostanie usunięta. Oryginał pozostaje na dysku.').classes('hint')
@@ -699,8 +712,8 @@ class Interface:
                                     info = STATUS[job['status']]
                                     if job['duration']:
                                         info += ' · ' + short_time(job['duration'])
-                                    if job['elapsed']:
-                                        info += f" · czas {short_time(job['elapsed'])}"
+                                    if job['status'] != 'waiting':
+                                        info += f" · Czas od uruchomienia: {short_time(self.tasks.elapsed(job))}"
                                     ui.label(info).classes('hint')
                                 ui.label(STATUS[job['status']]).classes('status-chip')
                                 if job['status'] not in ('error', 'cancelled'):
@@ -740,6 +753,7 @@ class Interface:
                 ui.button('Wróć do kolejki', icon='arrow_back', on_click=lambda: self.navigate('queue')).props('flat no-caps')
             progress = ui.linear_progress(value=0, show_value=False).classes('w-full')
             progress_info = ui.label('').classes('hint')
+            elapsed_time = ui.label('').classes('text-sm')
             eta = ui.label('').classes('text-sm')
             ui.label('Tekst pojawia się po rozpoznaniu kolejnych segmentów; wynik końcowy można edytować po zakończeniu.').classes('hint')
             with ui.row().classes('w-full items-center justify-between'):
@@ -769,6 +783,7 @@ class Interface:
                 status.set_text(STATUS.get(current['status'], current['status']))
                 progress.value = current['progress'] or 0
                 progress_info.set_text(f"Przetworzono {current['progress'] * 100:.1f}% nagrania" if current['progress'] is not None else 'Czas trwania lub postęp nie jest jeszcze dostępny.')
+                elapsed_time.set_text(f"Czas od uruchomienia: {short_time(self.tasks.elapsed(current))}")
                 eta.set_text(eta_text(current))
                 result_button.set_visibility(current['status'] == 'done')
                 rows = self.db.live_segments(job_id, after=last_sequence)
@@ -952,6 +967,7 @@ class Interface:
             if result.get('gpu_name'):
                 device_text += f" {result.get('gpu_index')} · {result['gpu_name']}"
             ui.label(f"{result.get('model', '—')} · {device_text} · {result.get('language', '—')} · RTF {result.get('rtf', 0) or 0:.2f}").classes('hint grow')
+            ui.label(f"Czas od uruchomienia: {short_time(job.get('elapsed'))}").classes('hint')
             for fmt in ('txt', 'srt', 'vtt', 'json', 'csv'):
                 ui.button(fmt.upper(), on_click=lambda _, f=fmt: ui.download(f'/export/{job_id}/{f}')).props('outline no-caps dense')
             async def reexport():

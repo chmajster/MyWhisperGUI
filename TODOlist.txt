@@ -1,3 +1,4 @@
 Przepisz na python 3.15
 Dodaj aby aplikacja dzialal także na vulkan
 dodaj aby aplikacja dzialal pod linux także
+w "Edytor transkrypcji" dodaj filtr ze można np. zobaczyć tylko wiadomość wybranego/wybranych rozmowcow, oraz timestamt wlacz/wylacz

@@ -206,9 +206,9 @@ def test_live_view_updates_and_displays_eta():
     name = f'live-test-{job_id}.wav'
     segment = {'start': 0, 'end': 12, 'text': 'Pierwszy rozpoznany fragment.'}
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute('''INSERT INTO jobs(id,name,path,status,position,created_at,updated_at,options,progress,duration,eta_seconds)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-                     (job_id, name, 'unused', 'transcribing', 999999, '2026', '2026', Settings().model_dump_json(), .25, 120, 90))
+        conn.execute('''INSERT INTO jobs(id,name,path,status,position,created_at,updated_at,options,progress,duration,eta_seconds,elapsed)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+                     (job_id, name, 'unused', 'transcribing', 999999, '2026', '2026', Settings().model_dump_json(), .25, 120, 90, 13))
         conn.execute('INSERT INTO job_segments VALUES (?,?,?)', (job_id, 0, json.dumps(segment, ensure_ascii=False)))
     socket = socketio.Client(reconnection=False)
     try:
@@ -248,9 +248,12 @@ def test_live_view_updates_and_displays_eta():
         assert socket.call('handshake', {'client_id': client_id, 'document_id': str(uuid.uuid4()),
                                         'tab_id': str(uuid.uuid4()), 'next_message_id': 0}, timeout=5)
         with changed:
+            transcription = next((key, item) for key, item in elements.items() if item and item.get('props', {}).get('label') == 'Transkrypcja')
+            click(*transcription)
+            wait_for(lambda: contains(f'{name} · Transkrypcja · Czas od uruchomienia: 00:00:13'),
+                     'Elapsed time was not displayed in the transcription view')
             queue = next((key, item) for key, item in elements.items() if item and item.get('props', {}).get('label') == 'Kolejka')
             click(*queue)
-            wait_for(lambda: contains(name), 'Job did not appear in the queue')
             def descendants(root):
                 result = []
                 todo = [root]
@@ -260,21 +263,27 @@ def test_live_view_updates_and_displays_eta():
                         result.append(item)
                         todo.extend(item.get('children', []))
                 return result
-            row = next(key for key, item in elements.items() if item and 'job-row' in item.get('class', [])
-                       and any(child.get('text') == name for child in descendants(key)))
+            def queue_row():
+                return next((key for key, item in elements.items() if item and 'job-row' in item.get('class', [])
+                             and any(child.get('text') == name for child in descendants(key))), None)
+            wait_for(lambda: queue_row() is not None, 'Job did not appear in the queue')
+            row = queue_row()
+            assert any('Czas od uruchomienia: 00:00:13' in child.get('text', '') for child in descendants(row))
             buttons = [(key, item) for key, item in elements.items() if item in descendants(row)
                        and item.get('props', {}).get('label') == 'Podgląd na żywo']
             assert buttons, 'Live view button was not displayed'
             click(*buttons[0])
             wait_for(lambda: contains('Pierwszy rozpoznany fragment.'), 'Initial segment was not rendered')
             wait_for(lambda: contains('ETA: około 00:01:30'), 'Estimated time was not rendered')
+            wait_for(lambda: contains('Czas od uruchomienia: 00:00:13'), 'Elapsed time was not displayed in the live view')
         second = {'start': 13, 'end': 20, 'text': 'Następny fragment na żywo.'}
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute('INSERT INTO job_segments VALUES (?,?,?)', (job_id, 1, json.dumps(second, ensure_ascii=False)))
-            conn.execute('UPDATE jobs SET progress=?,eta_seconds=? WHERE id=?', (.5, 45, job_id))
+            conn.execute('UPDATE jobs SET progress=?,eta_seconds=?,elapsed=? WHERE id=?', (.5, 45, 20, job_id))
         with changed:
             wait_for(lambda: contains('Następny fragment na żywo.'), 'New segment did not appear')
             wait_for(lambda: contains('ETA: około 00:00:45'), 'Updated ETA did not appear')
+            wait_for(lambda: contains('Czas od uruchomienia: 00:00:20'), 'Elapsed time did not update in the live view')
     finally:
         if socket.connected:
             socket.disconnect()

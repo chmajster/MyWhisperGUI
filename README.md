@@ -92,6 +92,8 @@ i [oficjalne pakiety PyTorch CUDA 12.8](https://pytorch.org/get-started/previous
    **Podgląd na żywo** pokazuje dotychczas rozpoznane segmenty i szacowany czas
    do końca (ETA). ETA opiera się na zmierzonym tempie transkrypcji, jest
    orientacyjne i pojawia się dopiero po przetworzeniu części nagrania.
+   Czas od uruchomienia zadania jest widoczny w transkrypcji, kolejce i podglądzie.
+   Obejmuje przygotowanie i pobieranie modelu, ale nie oczekiwanie w kolejce.
 4. Po zakończeniu zadania otwiera się edytor z odtwarzaczem, segmentami,
    automatycznym zapisem, wyszukiwaniem i pobieraniem TXT, SRT, VTT, JSON i CSV.
    Długie transkrypcje są wyświetlane po 50 fragmentów na stronie; wyszukiwanie,

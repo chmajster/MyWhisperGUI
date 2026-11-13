@@ -29,7 +29,19 @@ class TaskQueue:
         self.threads = []
         self.claim_lock = threading.Lock()
         self.gpu_slot = threading.Lock()
+        self._timing_lock = threading.Lock()
+        self._started_jobs = {}
         self.running = 0
+
+    def elapsed(self, job):
+        """Return a running task's elapsed time, or its saved final duration."""
+        if job['status'] == 'waiting':
+            return None
+        with self._timing_lock:
+            started = self._started_jobs.get(job['id'])
+        if started is not None and job['status'] not in ('done', 'error', 'cancelled'):
+            return max(0.0, time.monotonic() - started)
+        return job.get('elapsed')
 
     def start(self):
         if self.threads:
@@ -67,8 +79,17 @@ class TaskQueue:
         cpu_engine.unload()
 
     def _run(self, job, cpu_engine):
-        job_id = job['id']
         started = time.monotonic()
+        with self._timing_lock:
+            self._started_jobs[job['id']] = started
+        try:
+            self._run_started(job, cpu_engine, started)
+        finally:
+            with self._timing_lock:
+                self._started_jobs.pop(job['id'], None)
+
+    def _run_started(self, job, cpu_engine, started):
+        job_id = job['id']
         options = Settings.model_validate_json(job['options'])
 
         def cancelled():
