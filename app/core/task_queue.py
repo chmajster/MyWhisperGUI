@@ -10,6 +10,7 @@ from app.core.exporter import export_all
 from app.core.model_manager import DownloadCancelled
 from app.core.speaker_diarization import SpeakerCancelled, SpeakerDiarizer
 from app.core.whisper_engine import Cancelled, WhisperEngine
+from app.core.vulkan_engine import VulkanEngine
 
 
 def estimate_eta(processed, duration, elapsed):
@@ -25,6 +26,7 @@ class TaskQueue:
     def __init__(self, db, models):
         self.db, self.models = db, models
         self.gpu_engine = WhisperEngine(models)
+        self.vulkan_engine = VulkanEngine(models)
         self.stop_event = threading.Event()
         self.threads = []
         self.claim_lock = threading.Lock()
@@ -57,6 +59,7 @@ class TaskQueue:
             worker.join(timeout=5)
         if unload_gpu and not any(worker.is_alive() for worker in self.threads):
             self.gpu_engine.unload()
+            self.vulkan_engine.unload()
 
     def _worker(self, index):
         cpu_engine = WhisperEngine(self.models)
@@ -99,9 +102,12 @@ class TaskQueue:
         try:
             if cancelled():
                 raise Cancelled()
-            if not self.models.available(options.model, options.cache_dir):
+            if options.device == 'vulkan':
+                self.vulkan_engine.check_prerequisites()
+            model_args = (options.model, options.cache_dir, 'vulkan') if options.device == 'vulkan' else (options.model, options.cache_dir)
+            if not self.models.available(*model_args):
                 self.db.update(job_id, status='downloading', message='Pobieranie modelu')
-                self.models.download(options.model, options.cache_dir)
+                self.models.download(*model_args)
             if cancelled():
                 raise Cancelled()
             self.db.update(job_id, status='preparing', message='Odczytywanie nagrania')
@@ -131,10 +137,10 @@ class TaskQueue:
                 eta = estimate_eta(processed, duration, current - inference_started) if inference_started else None
                 self.db.update(job_id, progress=value, elapsed=current - started, eta_seconds=eta)
 
-            engine = self.gpu_engine if options.device == 'cuda' else cpu_engine
+            engine = self.vulkan_engine if options.device == 'vulkan' else self.gpu_engine if options.device == 'cuda' else cpu_engine
             acquired = False
             try:
-                if options.device == 'cuda':
+                if options.device in ('cuda', 'vulkan'):
                     self.db.update(job_id, message='Oczekiwanie na dostęp do GPU')
                     while not acquired:
                         if cancelled():

@@ -2,7 +2,7 @@
 param([switch]$RemoveData)
 $ErrorActionPreference = 'Stop'
 $root = [System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
-$names = @('.venv')
+$names = @('.venv-py312')
 if ($RemoveData) { $names += @('data', 'models', 'output', 'logs') }
 foreach ($name in $names) {
     $target = [System.IO.Path]::GetFullPath((Join-Path $root $name))

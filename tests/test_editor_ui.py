@@ -25,6 +25,7 @@ def test_long_transcript_pagination_search_and_save(media_present):
     name = f'editor-test-{job_id}.flac'
     source = Path(__file__).parent / 'fixtures' / ('jfk.flac' if media_present else f'missing-{job_id}.flac')
     segments = [{'start': float(index), 'end': index + .5, 'text': f'Fragment {index:04}'} for index in range(2500)]
+    segments[0]['words'] = [{'start': 0., 'end': .5, 'word': 'Fragment 0000'}]
     segments[10]['text'] = 'needle-0010'
     segments[-1]['text'] = 'needle-2499'
     result = {'model': 'tiny', 'device': 'cpu', 'language': 'pl', 'segments': segments}
@@ -156,11 +157,51 @@ def test_long_transcript_pagination_search_and_save(media_present):
             emit_event(*search, 'update:value', 'Anna')
             wait_for(lambda: contains('Fragmenty 1–1 z 1'), 'Nie znaleziono fragmentów rozmówcy')
 
+            emit_event(*search, 'update:value', None)
+            wait_for(lambda: contains('Fragmenty 1–50 z 2500'), 'Nie wyczyszczono wyszukiwania')
+            row = next(key for key, item in elements.items() if item and 'job-row' in item.get('class', [])
+                       and any(child.get('props', {}).get('value') == 'Fragment 0001' for child in descendants(key)))
+            field = next((key, item) for key, item in speaker_fields() if item in descendants(row))
+            emit_event(*field, 'update:value', 'Bartek')
+            wait_for(lambda: saved_speaker(1) == 'Bartek', 'Nie zapisano drugiego rozmówcy')
+
+            def filter_field():
+                return next((key, item) for key, item in elements.items()
+                            if item and item.get('props', {}).get('label') == 'Filtr rozmówców')
+
+            def speaker_option(label):
+                return next((option for option in filter_field()[1]['props']['options'] if option['label'] == label), None)
+
+            wait_for(lambda: speaker_option('Anna') and speaker_option('Bartek'), 'Nie odświeżono listy rozmówców')
+            emit_event(*filter_field(), 'update:modelValue', [speaker_option('Anna'), speaker_option('Bartek')])
+            wait_for(lambda: contains('Fragmenty 1–2 z 2'), 'Filtr nie wybrał obu rozmówców')
+            assert len(fields()) == 2
+            emit_event(*search, 'update:value', 'Bartek')
+            wait_for(lambda: contains('Fragmenty 1–1 z 1'), 'Filtr i wyszukiwanie nie działają razem')
+            field = next((key, item) for key, item in fields() if item.get('props', {}).get('value') == 'Fragment 0001')
+            emit_event(*field, 'update:value', 'Poprawiony fragment 0001')
+            wait_for(lambda: saved_text(1) == 'Poprawiony fragment 0001', 'Edycja przefiltrowanego fragmentu trafiła pod zły indeks')
+            emit_event(*search, 'update:value', None)
+            wait_for(lambda: contains('Fragmenty 1–2 z 2'), 'Nie przywrócono obu rozmówców')
+
+            show_time = next((key, item) for key, item in elements.items()
+                             if item and item.get('tag') == 'q-toggle' and item.get('text') == 'Pokaż znaczniki czasu')
+            assert contains('Fragment 0000 [00:00:00]')
+            emit_event(*show_time, 'update:modelValue', False)
+            wait_for(lambda: not contains('Fragment 0000 [00:00:00]'), 'Nie ukryto znaczników słów')
+            assert not any(item and item.get('props', {}).get('label') == '00:00:00' for item in elements.values())
+            emit_event(*show_time, 'update:modelValue', True)
+            wait_for(lambda: contains('Fragment 0000 [00:00:00]'), 'Nie przywrócono znaczników czasu')
+
+            emit_event(*filter_field(), 'update:modelValue', [speaker_option('Nieustalony')])
+            wait_for(lambda: contains('Fragmenty 1–50 z 2498'), 'Nie wybrano nieustalonych rozmówców')
+
         response = requests.get(f'http://127.0.0.1:8080/export/{job_id}/txt', timeout=5)
         response.raise_for_status()
         lines = response.text.splitlines()
         assert len(lines) == 2500
         assert lines[0] == 'Anna: Fragment 0000'
+        assert lines[1] == 'Bartek: Poprawiony fragment 0001'
         assert lines[50] == 'Poprawiony fragment 0050'
         assert lines[2499] == 'needle-poprawiony'
     finally:

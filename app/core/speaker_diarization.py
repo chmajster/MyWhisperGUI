@@ -124,7 +124,7 @@ class SpeakerDiarizer:
         try:
             import sherpa_onnx as sherpa
         except ImportError as exc:
-            raise RuntimeError('Brak silnika rozmówców. Uruchom repair.ps1, aby zainstalować zależności.') from exc
+            raise RuntimeError('Brak silnika rozmówców. Zainstaluj zależności aplikacji zgodnie z README.') from exc
         segmentation, embedding = prepare_models(cache_dir, cancelled)
         _check_cancelled(cancelled)
         embedding_config = sherpa.SpeakerEmbeddingExtractorConfig(model=str(embedding), num_threads=1, provider='cpu')

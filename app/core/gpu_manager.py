@@ -1,4 +1,4 @@
-"""Windows CUDA setup and diagnostics. A positive probe means real inference."""
+"""CUDA setup and diagnostics. A positive probe means real inference."""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import site
 import subprocess
 import sys
 
@@ -19,11 +20,14 @@ _dll_handles = {}
 
 
 def configure_cuda_dlls():
-    """Make the CUDA 12/cuDNN 9 DLLs bundled with the Windows Torch wheel visible to CT2."""
+    """Expose CUDA/cuDNN libraries installed with Torch or NVIDIA's wheels."""
     spec = importlib.util.find_spec('torch')
     paths = []
     if spec and spec.submodule_search_locations:
         paths.append(Path(next(iter(spec.submodule_search_locations))) / 'lib')
+    for packages in site.getsitepackages():
+        for package in ('cublas', 'cudnn'):
+            paths.append(Path(packages) / 'nvidia' / package / ('bin' if os.name == 'nt' else 'lib'))
     paths.append(ROOT / 'cuda' / 'bin')
     paths = [p for p in paths if p.is_dir()]
     existing = os.environ.get('PATH', '').split(os.pathsep)
@@ -47,6 +51,12 @@ def check_cuda_libraries():
                 ctypes.WinDLL(name)
             except OSError as exc:
                 raise RuntimeError(f'Brak wymaganej biblioteki {name}: {exc}. Uruchom repair.ps1.') from exc
+    else:
+        for name in ('libcublas.so.12', 'libcudnn.so.9'):
+            try:
+                ctypes.CDLL(name)
+            except OSError as exc:
+                raise RuntimeError(f'Brak wymaganej biblioteki {name}: {exc}. Uruchom aplikację przez start.sh i sprawdź instalację CUDA.') from exc
 
 
 def _gpu_uuid(value):
@@ -150,7 +160,7 @@ def diagnostics(gpu_id=''):
             result[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             result[package] = 'nie zainstalowano'
-    for name in ('cublas64_12.dll', 'cudnn64_9.dll'):
+    for name in (('cublas64_12.dll', 'cudnn64_9.dll') if os.name == 'nt' else ('libcublas.so.12', 'libcudnn.so.9')):
         try:
             ctypes.WinDLL(name) if os.name == 'nt' else ctypes.CDLL(name)
             result[name] = 'dostępna'
@@ -184,8 +194,11 @@ def friendly_error(exc):
     lower = message.lower()
     if 'out of memory' in lower or 'cublas_status_alloc_failed' in lower:
         return 'Brak pamięci VRAM. Zamknij inne aplikacje GPU, wyłącz zatrzymywanie modelu albo wybierz mniejszy model. ' + message
+    if 'vulkan' in lower:
+        return message
     if any(word in lower for word in ('cublas', 'cudnn', 'dll', 'library')):
-        return 'Nie można załadować bibliotek CUDA/cuBLAS/cuDNN. Uruchom repair.ps1 i sprawdź diagnostykę. ' + message
+        hint = 'Uruchom repair.ps1' if os.name == 'nt' else 'Uruchom bash install.sh --cuda i bash start.sh'
+        return f'Nie można załadować bibliotek CUDA/cuBLAS/cuDNN. {hint} i sprawdź diagnostykę. ' + message
     if any(word in lower for word in ('cuda', 'driver', 'device')):
         return 'CUDA nie działa poprawnie. Sprawdź sterownik NVIDIA i uruchom test GPU w Diagnostyce. ' + message
     return message

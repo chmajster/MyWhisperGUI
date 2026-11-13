@@ -67,7 +67,10 @@ class WhisperEngine:
             device_index = 0
             if options.compute_type != 'auto':
                 raise ValueError('Dla CPU wybierz precyzję automatyczną; float16 i int8_float16 są ustawieniami GPU.')
-            precision = 'int8'
+            # CTranslate2 reports the concrete CPU type as int8_float32 even
+            # when its generic int8 alias was requested. Request the concrete
+            # type so that the verification below remains meaningful.
+            precision = 'int8_float32'
         path = self.models.path(options.model, options.cache_dir)
         key = (str(path), options.device, precision,
                (selected_gpu['id'], device_index) if selected_gpu else None)

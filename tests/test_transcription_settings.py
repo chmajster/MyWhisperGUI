@@ -1,4 +1,5 @@
 import inspect
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,7 +10,7 @@ from nicegui import ui
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.core import audio_processor
+from app.core import audio_processor, whisper_engine
 from app.core.whisper_engine import WhisperEngine
 from app.database.db import Database
 from app.ui.layout import form_values, option_form
@@ -27,6 +28,24 @@ def test_existing_settings_keep_faster_whisper_defaults():
     assert settings.vad_speech_pad_ms == vad.speech_pad_ms
     assert settings.hotwords == ''
     assert settings.beam_size == 3
+
+
+def test_cpu_requests_the_concrete_int8_precision(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeModel:
+        def __init__(self, path, **kwargs):
+            calls.append(kwargs)
+            self.model = SimpleNamespace(device='cpu', compute_type='int8_float32', unload_model=lambda **_: None)
+
+    monkeypatch.setattr(whisper_engine, 'configure_cuda_dlls', lambda: None)
+    monkeypatch.setitem(sys.modules, 'ctranslate2', SimpleNamespace())
+    monkeypatch.setitem(sys.modules, 'faster_whisper', SimpleNamespace(WhisperModel=FakeModel))
+    engine = WhisperEngine(SimpleNamespace(path=lambda *_: tmp_path))
+    model, precision = engine._model(Settings(model='tiny', device='cpu'))
+    assert model.model.compute_type == precision == 'int8_float32'
+    assert calls[0]['compute_type'] == 'int8_float32'
+    engine.unload()
 
 
 @pytest.mark.parametrize('include_paths', [False, True])

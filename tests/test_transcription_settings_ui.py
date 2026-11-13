@@ -71,6 +71,15 @@ def test_transcription_options_and_legend_over_localhost():
             send(speaker, 'update:modelValue', True)
             wait_for(lambda: elements[speaker[0]]['props']['model-value'] is True, 'Nie włączono rozróżniania rozmówców')
 
+            device = find_label('Urządzenie')
+            original_device = device[1]['props']['model-value']
+            vulkan = next(option for option in device[1]['props']['options'] if option['label'] == 'GPU · Vulkan')
+            send(device, 'update:modelValue', vulkan)
+            wait_for(lambda: not find_label('Numer GPU Vulkan')[1]['props'].get('disable')
+                     and find_label('Kara powtórzeń')[1]['props'].get('disable'), 'Nie przełączono ustawień Vulkan')
+            send(find_label('Urządzenie'), 'update:modelValue', original_device)
+            wait_for(lambda: find_label('Numer GPU Vulkan')[1]['props'].get('disable'), 'Nie wyłączono pola Vulkan')
+
             temperature = find_label('Temperature')
             send(temperature, 'update:modelValue', .4)
             wait_for(lambda: bool(find_label('Beam size')[1]['props'].get('disable'))

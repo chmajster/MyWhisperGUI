@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -163,4 +164,5 @@ def test_queue_records_real_file_errors(tmp_path):
 
 def test_gpu_errors_are_actionable():
     assert 'VRAM' in friendly_error(RuntimeError('CUDA out of memory'))
-    assert 'repair.ps1' in friendly_error(RuntimeError('cudnn64_9.dll missing'))
+    expected = 'repair.ps1' if os.name == 'nt' else 'install.sh --cuda'
+    assert expected in friendly_error(RuntimeError('cudnn64_9.dll missing'))

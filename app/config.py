@@ -17,8 +17,9 @@ for directory in (DATA, UPLOADS, RECORDINGS, LOGS, ROOT / 'models', ROOT / 'outp
 class Settings(BaseModel):
     model: Literal['tiny', 'base', 'small', 'medium', 'large-v3', 'turbo'] = 'large-v3'
     language: str = ''
-    device: Literal['cuda', 'cpu'] = 'cuda'
+    device: Literal['cuda', 'vulkan', 'cpu'] = 'cuda'
     gpu_id: str = Field(default='', max_length=128)
+    vulkan_device: int = Field(default=0, ge=0, le=31)
     compute_type: Literal['auto', 'float16', 'int8_float16'] = 'auto'
     task: Literal['transcribe', 'translate'] = 'transcribe'
     vad: bool = True
@@ -58,3 +59,6 @@ MODEL_SIZES = {
     'tiny': 'ok. 75 MB', 'base': 'ok. 145 MB', 'small': 'ok. 0,5 GB',
     'medium': 'ok. 1,5 GB', 'large-v3': 'ok. 3,1 GB', 'turbo': 'ok. 1,6 GB',
 }
+
+VULKAN_MODEL_REPO = 'ggerganov/whisper.cpp'
+VULKAN_MODELS = {name: f"ggml-{'large-v3-turbo' if name == 'turbo' else name}.bin" for name in MODEL_REPOS}

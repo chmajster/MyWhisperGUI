@@ -20,6 +20,23 @@ NAV = [('dashboard', 'Dashboard', 'space_dashboard'), ('transcription', 'Transkr
        ('history', 'Historia', 'history'), ('models', 'Modele AI', 'memory'),
        ('settings', 'Ustawienia', 'tune'), ('diagnostics', 'Diagnostyka', 'monitor_heart')]
 EDITOR_PAGE_SIZE = 50
+UNKNOWN_SPEAKER = 'unknown:'
+
+
+def speaker_filter_options(segments, selected=()):
+    """Use distinct keys for unnamed speakers and user-entered names."""
+    names = {segment.get('speaker') for segment in segments if segment.get('speaker')}
+    names.update(key[len('speaker:'):] for key in selected if key.startswith('speaker:'))
+    return {UNKNOWN_SPEAKER: 'Nieustalony',
+            **{f'speaker:{name}': name for name in sorted(names, key=str.casefold)}}
+
+
+def matching_segments(segments, query='', speakers=()):
+    query = query.casefold()
+    selected = set(speakers or ())
+    return [(index, segment) for index, segment in enumerate(segments)
+            if (not selected or (f"speaker:{segment['speaker']}" if segment.get('speaker') else UNKNOWN_SPEAKER) in selected)
+            and (query in segment['text'].casefold() or query in (segment.get('speaker') or '').casefold())]
 
 CSS = '''
 <style>
@@ -223,8 +240,9 @@ def option_form(settings, include_paths=False):
         fields['language'] = ui.select({'': 'Wykryj automatycznie', 'pl': 'Polski', 'en': 'Angielski', 'de': 'Niemiecki', 'es': 'Hiszpański', 'fr': 'Francuski', 'uk': 'Ukraiński'}, label='Język nagrania', value=settings.language).classes('grow min-w-44').props('outlined')
         fields['task'] = ui.select({'transcribe': 'Transkrypcja', 'translate': 'Tłumaczenie na angielski'}, label='Tryb', value=settings.task).classes('grow min-w-44').props('outlined')
     with ui.row().classes('w-full gap-4 items-start'):
-        fields['device'] = ui.select({'cuda': 'GPU · CUDA', 'cpu': 'CPU (świadomie)'}, label='Urządzenie', value=settings.device).classes('grow min-w-44').props('outlined')
+        fields['device'] = ui.select({'cuda': 'GPU · CUDA', 'vulkan': 'GPU · Vulkan', 'cpu': 'CPU'}, label='Urządzenie', value=settings.device).classes('grow min-w-44').props('outlined')
         fields['gpu_id'], set_gpu_enabled = gpu_picker(settings.gpu_id)
+        fields['vulkan_device'] = ui.number('Numer GPU Vulkan', min=0, max=31, step=1, precision=0, value=settings.vulkan_device).classes('w-40').props('outlined')
         fields['compute_type'] = ui.select({'auto': 'Automatyczna', 'float16': 'Wydajność · float16', 'int8_float16': 'Oszczędzanie VRAM · int8_float16'}, label='Precyzja GPU', value=settings.compute_type).classes('grow min-w-44').props('outlined')
         fields['beam_size'] = ui.number('Beam size', min=1, max=10, step=1, value=settings.beam_size, precision=0).classes('w-32').props('outlined')
         fields['temperature'] = ui.number('Temperature', min=0, max=1, step=.1, value=settings.temperature).classes('w-32').props('outlined')
@@ -235,6 +253,7 @@ def option_form(settings, include_paths=False):
         fields['word_timestamps'] = ui.switch('Znaczniki słów', value=settings.word_timestamps)
         fields['keep_model'] = ui.switch('Pozostaw model w pamięci', value=settings.keep_model)
     ui.label('Rozmówcy: analiza lokalna na CPU. Przy pierwszym użyciu zostaną pobrane modele (około 46 MB); wyniki można poprawić w edytorze.').classes('hint')
+    ui.label('Vulkan używa whisper.cpp i oddzielnych modeli GGML. Część opcji faster-whisper i pozostawianie modelu w pamięci nie jest dostępna.').classes('hint')
     fields['initial_prompt'] = ui.textarea('Kontekst początkowy (opcjonalny)', value=settings.initial_prompt).classes('w-full').props('outlined autogrow')
     ui.label('Whisper tłumaczy mowę wyłącznie na angielski. Turbo nie obsługuje trybu tłumaczenia.').classes('hint')
 
@@ -257,7 +276,7 @@ def option_form(settings, include_paths=False):
     guide = [
         ('Model Whisper', 'Większe modele wymagają więcej pamięci i czasu; mogą lepiej rozpoznawać trudną mowę. Turbo nie służy do tłumaczenia.'),
         ('Język i tryb', 'Wybierz język nagrania albo wykrywanie automatyczne z pierwszej porcji. Tryb tłumaczenia Whisper daje tekst po angielsku.'),
-        ('Urządzenie, karta GPU i precyzja', 'Wybierz konkretną kartę NVIDIA CUDA albo CPU. Wybrana karta jest zapisywana dla zadania. Int8/float16 może zużywać mniej VRAM niż float16; tryb automatyczny dobiera precyzję dla wybranej karty.'),
+        ('Urządzenie, karta GPU i precyzja', 'Wybierz CUDA, Vulkan lub CPU. W Vulkan numer karty odpowiada numeracji whisper.cpp; format modelu określa precyzję. Opcje precyzji dotyczą CUDA.'),
         ('Beam size', 'Przy temperaturze 0 określa liczbę rozważanych wariantów. 1 jest zwykle szybsze, 5 to domyślna wartość; większa liczba może pomóc kosztem czasu, bez gwarancji poprawy.'),
         ('Temperature', '0 daje deterministyczny wybór z użyciem Beam size. Powyżej 0 włącza losowanie i Best of; wyniki mogą się różnić między uruchomieniami. Aplikacja używa jednej ustawionej temperatury.'),
         ('Best of', 'Liczba losowanych kandydatów ocenianych przy temperaturze powyżej 0. Więcej kandydatów może wydłużyć pracę; domyślnie 5.'),
@@ -284,10 +303,15 @@ def option_form(settings, include_paths=False):
 
     def update_parameter_controls():
         set_gpu_enabled(fields['device'].value == 'cuda')
+        vulkan = fields['device'].value == 'vulkan'
+        fields['vulkan_device'].set_enabled(vulkan)
+        fields['compute_type'].set_enabled(fields['device'].value == 'cuda')
         sampling = (fields['temperature'].value or 0) > 0
         fields['beam_size'].set_enabled(not sampling)
-        fields['patience'].set_enabled(not sampling)
+        fields['patience'].set_enabled(not sampling and not vulkan)
         fields['best_of'].set_enabled(sampling)
+        for name in ('repetition_penalty', 'no_repeat_ngram_size', 'condition_on_previous_text', 'hotwords', 'keep_model'):
+            fields[name].set_enabled(not vulkan)
         for name in ('vad_threshold', 'vad_min_silence_ms', 'vad_speech_pad_ms'):
             fields[name].set_enabled(bool(fields['vad'].value))
 
@@ -308,7 +332,13 @@ def option_form(settings, include_paths=False):
 
 
 def form_values(fields, original):
-    return Settings.model_validate({**original.model_dump(), **{key: field.value for key, field in fields.items()}})
+    values = {**original.model_dump(), **{key: field.value for key, field in fields.items()}}
+    if values['device'] == 'cpu':
+        values['compute_type'] = 'auto'
+    if values['device'] == 'vulkan':
+        values.update(compute_type='auto', patience=1.0, repetition_penalty=1.0, no_repeat_ngram_size=0,
+                      condition_on_previous_text=True, hotwords='', keep_model=False)
+    return Settings.model_validate(values)
 
 
 class Interface:
@@ -384,8 +414,8 @@ class Interface:
                     value = ui.label('—').classes('metric-value q-mt-sm')
                     sub = ui.label('').classes('hint')
                     return value, sub
-            gpu, gpu_sub = metric('Karta graficzna', 'memory')
-            vram, vram_sub = metric('Pamięć VRAM', 'donut_large')
+            gpu, gpu_sub = metric('Karta CUDA', 'memory')
+            vram, vram_sub = metric('Pamięć VRAM CUDA', 'donut_large')
             waiting, waiting_sub = metric('W kolejce', 'hourglass_empty')
             completed, completed_sub = metric('Ukończone', 'task_alt')
         with ui.row().classes('w-full gap-4 q-mt-md'):
@@ -519,7 +549,7 @@ class Interface:
             default_device = next(iter(devices), None)
         with ui.card().classes('panel w-full'):
             ui.label('Źródło i ustawienia').classes('section-title')
-            ui.label('Dźwięk jest przetwarzany lokalnie i nie jest zapisywany. Opuszczenie zakładki lub zamknięcie karty zatrzymuje mikrofon.').classes('hint')
+            ui.label('Dźwięk jest przetwarzany lokalnie. W Vulkan porcje są zapisywane w plikach tymczasowych i usuwane po przetworzeniu. Opuszczenie zakładki lub zamknięcie karty zatrzymuje mikrofon.').classes('hint')
             with ui.row().classes('w-full gap-4 items-start'):
                 microphone = ui.select(devices, label='Mikrofon', value=default_device).classes('grow min-w-44').props('outlined')
                 model = ui.select({name: name for name in MODEL_REPOS}, label='Model Whisper', value=settings.model).classes('grow min-w-44').props('outlined')
@@ -529,8 +559,9 @@ class Interface:
                 interval = ui.select({3: '3 sekundy', 5: '5 sekund', 8: '8 sekund', 10: '10 sekund'},
                                      label='Długość porcji', value=5).classes('min-w-44').props('outlined')
             with ui.row().classes('w-full gap-4 items-start'):
-                device = ui.select({'cuda': 'GPU · CUDA', 'cpu': 'CPU'}, label='Urządzenie', value=settings.device).classes('grow min-w-44').props('outlined')
+                device = ui.select({'cuda': 'GPU · CUDA', 'vulkan': 'GPU · Vulkan', 'cpu': 'CPU'}, label='Urządzenie', value=settings.device).classes('grow min-w-44').props('outlined')
                 gpu, set_gpu_enabled = gpu_picker(settings.gpu_id)
+                vulkan_device = ui.number('Numer GPU Vulkan', min=0, max=31, step=1, precision=0, value=settings.vulkan_device).classes('w-40').props('outlined')
                 precision = ui.select({'auto': 'Automatyczna', 'float16': 'Float16', 'int8_float16': 'Int8/float16'},
                                       label='Precyzja GPU', value=settings.compute_type).classes('grow min-w-44').props('outlined')
                 vad = ui.switch('Filtr ciszy VAD', value=settings.vad)
@@ -564,15 +595,20 @@ class Interface:
                 control.set_enabled(not active)
             precision.set_enabled(not active and device.value == 'cuda')
             set_gpu_enabled(not active and device.value == 'cuda')
+            vulkan_device.set_enabled(not active and device.value == 'vulkan')
 
         def start_live():
             try:
                 if microphone.value is None:
                     raise ValueError('Nie znaleziono mikrofonu wejściowego.')
-                options = Settings.model_validate({**settings.model_dump(), 'task': 'transcribe',
+                values = {**settings.model_dump(), 'task': 'transcribe',
                     'model': model.value, 'language': language.value, 'device': device.value,
                     'gpu_id': gpu.value or '', 'compute_type': precision.value if device.value == 'cuda' else 'auto',
-                    'vad': vad.value, 'diarization': diarization.value})
+                    'vulkan_device': vulkan_device.value, 'vad': vad.value, 'diarization': diarization.value}
+                if device.value == 'vulkan':
+                    values.update(patience=1.0, repetition_penalty=1.0, no_repeat_ngram_size=0,
+                                  condition_on_previous_text=True, hotwords='', keep_model=False)
+                options = Settings.model_validate(values)
                 self.captions_service.start(int(microphone.value), options, int(interval.value), self.owner_id)
                 refresh()
             except Exception as exc:
@@ -730,7 +766,8 @@ class Interface:
                                 ui.label(job['message']).classes('text-negative text-sm break-all' if job['status'] == 'error' else 'hint')
                             if job['status'] == 'downloading':
                                 options = Settings.model_validate_json(job['options'])
-                                detail = self.model_manager.details(options.model, options.cache_dir)
+                                args = (options.model, options.cache_dir, 'vulkan') if options.device == 'vulkan' else (options.model, options.cache_dir)
+                                detail = self.model_manager.details(*args)
                                 if detail.get('total'):
                                     ui.linear_progress(value=(detail.get('downloaded') or 0) / detail['total'], show_value=False).classes('w-full')
                                     ui.label(f"Pobrano {human_size(detail.get('downloaded'))} / {human_size(detail['total'])}").classes('hint')
@@ -855,6 +892,9 @@ class Interface:
             with ui.row().classes('w-full items-center justify-between'):
                 ui.label('Dostępność modeli').classes('section-title')
                 summary = ui.label('').classes('hint')
+            model_format = ui.select({'cpu': 'Faster-Whisper · CPU/CUDA', 'vulkan': 'Whisper.cpp · Vulkan'},
+                                     label='Format modeli', value='vulkan' if settings.device == 'vulkan' else 'cpu').classes('w-full').props('outlined dense')
+            ui.label('Modele Vulkan są osobnymi plikami GGML; transkrypcja pobiera brakujący model automatycznie.').classes('hint')
             elements = {}
             for name in MODEL_REPOS:
                 with ui.row().classes('w-full model-row items-center no-wrap') as model_row:
@@ -865,20 +905,22 @@ class Interface:
                     with ui.row().classes('model-badge items-center no-wrap') as badge:
                         badge_icon = ui.icon('cloud_download', size='17px')
                         badge_text = ui.label('NIEPOBRANY')
-                    download = ui.button('Pobierz', icon='download', on_click=lambda _, n=name: self.models_start(n, settings)).props('flat no-caps')
+                    download = ui.button('Pobierz', icon='download', on_click=lambda _, n=name: self.models_start(n, settings, model_format.value)).props('flat no-caps')
                     def cancel(_, n=name):
-                        self.models_cancel(n, settings)
+                        self.models_cancel(n, settings, model_format.value)
                         refresh()
                     cancel_button = ui.button('Anuluj', icon='cancel', on_click=cancel, color='negative').props('flat no-caps')
                     async def remove(n=name):
                         try:
+                            selected_format = model_format.value
                             active = self.db.list(('downloading', 'preparing', 'transcribing', 'exporting'))
                             if any(Settings.model_validate_json(j['options']).model == n for j in active):
                                 raise RuntimeError('Model jest używany przez aktywne zadanie.')
                             if self.captions_service.using_model(n, settings.cache_dir):
                                 raise RuntimeError('Model jest używany przez napisy na żywo.')
                             await run.io_bound(self.tasks.gpu_engine.unload)
-                            await run.io_bound(self.model_manager.delete, n, settings.cache_dir)
+                            args = (n, settings.cache_dir, 'vulkan') if selected_format == 'vulkan' else (n, settings.cache_dir)
+                            await run.io_bound(self.model_manager.delete, *args)
                             ui.notify('Usunięto model.', type='positive')
                         except Exception as exc:
                             ui.notify(str(exc), type='negative')
@@ -898,7 +940,8 @@ class Interface:
             def refresh():
                 available_count = 0
                 for name, (row, info, bar, badge, icon, badge_text, button, cancel_button, delete) in elements.items():
-                    detail = self.model_manager.details(name, settings.cache_dir)
+                    args = (name, settings.cache_dir, 'vulkan') if model_format.value == 'vulkan' else (name, settings.cache_dir)
+                    detail = self.model_manager.details(*args)
                     state = model_state(detail)
                     available_count += int(state == 'ready')
                     running = state in ('checking', 'downloading', 'cancelling')
@@ -943,14 +986,17 @@ class Interface:
                     delete.set_enabled(bool(detail['size']) and not running)
                 summary.set_text(f'Pobrane: {available_count} z {len(elements)} modeli')
             refresh()
+            model_format.on_value_change(lambda _: refresh())
             self.timer(1.5, refresh)
 
-    def models_start(self, name, settings):
-        self.model_manager.start_download(name, settings.cache_dir)
+    def models_start(self, name, settings, device='cpu'):
+        args = (name, settings.cache_dir, 'vulkan') if device == 'vulkan' else (name, settings.cache_dir)
+        self.model_manager.start_download(*args)
         ui.notify(f'Pobieranie modelu {name} rozpoczęte.')
 
-    def models_cancel(self, name, settings):
-        if self.model_manager.cancel_download(name, settings.cache_dir):
+    def models_cancel(self, name, settings, device='cpu'):
+        args = (name, settings.cache_dir, 'vulkan') if device == 'vulkan' else (name, settings.cache_dir)
+        if self.model_manager.cancel_download(*args):
             ui.notify(f'Anulowanie pobierania modelu {name}…')
         else:
             ui.notify('To pobieranie już się zakończyło.')
@@ -994,7 +1040,12 @@ class Interface:
                     ui.notify('Skopiowano transkrypcję.')
                 ui.button('Kopiuj całość', icon='content_copy', on_click=copy).props('flat no-caps')
             ui.label('Zmiany zapisują się automatycznie. Kliknij znacznik czasu, aby przejść do fragmentu.').classes('hint')
-            speaker_edit = ui.switch('Edytuj rozmówców', value=bool(result.get('diarization') or any(s.get('speaker') for s in result['segments'])))
+            speaker_filter = ui.select(speaker_filter_options(result['segments']), label='Filtr rozmówców',
+                                       value=[], multiple=True).classes('w-full').props('outlined dense clearable use-chips')
+            ui.label('Bez zaznaczenia widoczni są wszyscy rozmówcy. Filtr obejmuje również nieustalone głosy.').classes('hint')
+            with ui.row().classes('w-full items-center'):
+                speaker_edit = ui.switch('Edytuj rozmówców', value=bool(result.get('diarization') or any(s.get('speaker') for s in result['segments'])))
+                show_timestamps = ui.switch('Pokaż znaczniki czasu', value=True)
             state = {'page': 1}
 
             def change_page(event):
@@ -1012,9 +1063,7 @@ class Interface:
             def draw():
                 rows.clear()
                 current = json.loads(self.db.get(job_id)['result'])
-                query = (search.value or '').casefold()
-                matches = [(index, segment) for index, segment in enumerate(current['segments'])
-                           if query in segment['text'].casefold() or query in (segment.get('speaker') or '').casefold()]
+                matches = matching_segments(current['segments'], search.value or '', speaker_filter.value)
                 pages = max(1, (len(matches) + EDITOR_PAGE_SIZE - 1) // EDITOR_PAGE_SIZE)
                 state['page'] = min(max(1, state['page']), pages)
                 start = (state['page'] - 1) * EDITOR_PAGE_SIZE
@@ -1032,23 +1081,29 @@ class Interface:
                                 if player:
                                     player.seek(float(second))
                                     player.play()
-                            seek_button = ui.button(short_time(segment['start']), on_click=seek).props('flat no-caps dense').classes('text-primary')
-                            seek_button.set_enabled(player is not None)
+                            if show_timestamps.value:
+                                seek_button = ui.button(short_time(segment['start']), on_click=seek).props('flat no-caps dense').classes('text-primary')
+                                seek_button.set_enabled(player is not None)
                             if speaker_edit.value:
                                 def save_speaker(e, idx=index):
                                     try:
                                         self.db.edit_speaker(job_id, idx, e.value or '')
+                                        updated = json.loads(self.db.get(job_id)['result'])
+                                        speaker_filter.set_options(speaker_filter_options(updated['segments'], speaker_filter.value or []))
                                     except Exception as exc:
                                         ui.notify(str(exc), type='negative')
-                                ui.input(value=segment.get('speaker') or '', placeholder='Nieustalony',
-                                         on_change=save_speaker).classes('w-40').props('outlined dense maxlength=80')
+                                speaker_field = ui.input(value=segment.get('speaker') or '', placeholder='Nieustalony',
+                                                         on_change=save_speaker).classes('w-40').props('outlined dense maxlength=80')
+                                speaker_field.on('blur', lambda: draw() if speaker_filter.value else None)
+                            elif segment.get('speaker'):
+                                ui.label(segment['speaker']).classes('hint w-40')
                             def save(e, idx=index):
                                 try:
                                     self.db.edit_segment(job_id, idx, e.value or '')
                                 except Exception as exc:
                                     ui.notify(str(exc), type='negative')
                             ui.textarea(value=segment['text'], on_change=save).classes('grow').props('outlined autogrow')
-                            if segment.get('words'):
+                            if show_timestamps.value and segment.get('words'):
                                 ui.label(' '.join(f"{w['word'].strip()} [{short_time(w['start'])}]" for w in segment['words'])).classes('hint')
 
             def search_changed(_):
@@ -1056,7 +1111,9 @@ class Interface:
                 draw()
 
             search.on_value_change(search_changed)
+            speaker_filter.on_value_change(search_changed)
             speaker_edit.on_value_change(lambda _: draw())
+            show_timestamps.on_value_change(lambda _: draw())
             draw()
 
     def settings(self):
@@ -1081,6 +1138,8 @@ class Interface:
         with ui.card().classes('panel w-full'):
             ui.label('Środowisko').classes('section-title')
             gpu, _ = gpu_picker(self.db.settings().gpu_id)
+            vulkan_gpu = ui.number('Numer GPU Vulkan do testu', min=0, max=31, step=1, precision=0,
+                                   value=self.db.settings().vulkan_device).props('outlined')
             summary = ui.label('Odczytywanie informacji…').classes('whitespace-pre-wrap text-sm w-full break-all')
             revision = {'value': 0}
             async def refresh():
@@ -1102,9 +1161,39 @@ class Interface:
                 if not summary.is_deleted and revision['value'] == request:
                     summary.set_text(json.dumps(result, ensure_ascii=False, indent=2))
                     ui.notify('Test GPU zakończony.' if result.get('ok') else 'Test GPU nie powiódł się. Sprawdź szczegóły.', type='positive' if result.get('ok') else 'negative')
+
+            async def test_vulkan():
+                revision['value'] += 1
+                request = revision['value']
+                settings = self.db.settings()
+                if not self.model_manager.available('tiny', settings.cache_dir, 'vulkan'):
+                    summary.set_text('Brak modelu tiny dla Vulkan. Pobierz go w zakładce Modele AI i ponów test.')
+                    return
+                if not self.tasks.gpu_slot.acquire(blocking=False):
+                    summary.set_text('GPU jest zajęte. Zakończ inne zadanie lub sesję napisów i ponów test.')
+                    return
+                summary.set_text('Trwa rzeczywisty test whisper.cpp na Vulkan…')
+                try:
+                    from app.config import ROOT
+                    options = Settings(model='tiny', device='vulkan', cache_dir=settings.cache_dir,
+                                       vulkan_device=int(vulkan_gpu.value or 0), vad=False, beam_size=1)
+                    result = await run.io_bound(self.tasks.vulkan_engine.transcribe,
+                                                ROOT / 'tests' / 'fixtures' / 'polish.wav', options,
+                                                lambda _: None, lambda: False)
+                    data = {'ok': True, 'device': result['device'], 'gpu_index': result['gpu_index'],
+                            'language': result['language'], 'segments': result['segments'][:3]}
+                except Exception as exc:
+                    data = {'ok': False, 'error': str(exc)}
+                finally:
+                    self.tasks.gpu_slot.release()
+                if not summary.is_deleted and revision['value'] == request:
+                    summary.set_text(json.dumps(data, ensure_ascii=False, indent=2))
+                    ui.notify('Test Vulkan zakończony.' if data['ok'] else 'Test Vulkan nie powiódł się. Sprawdź szczegóły.',
+                              type='positive' if data['ok'] else 'negative')
             with ui.row():
                 ui.button('Odśwież', icon='refresh', on_click=refresh).props('outline no-caps')
                 ui.button('Uruchom test CUDA', icon='play_arrow', on_click=test_gpu).props('unelevated no-caps')
+                ui.button('Uruchom test Vulkan', icon='play_arrow', on_click=test_vulkan).props('unelevated no-caps')
             gpu.on_value_change(lambda _: refresh())
             self.timers.append(ui.timer(.1, refresh, once=True))
         from app.config import LOGS

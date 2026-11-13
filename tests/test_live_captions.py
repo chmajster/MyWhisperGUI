@@ -225,6 +225,33 @@ def test_gpu_slot_and_microphone_are_released_when_session_stops(monkeypatch, tm
         service.shutdown()
 
 
+def test_vulkan_live_captions_use_vulkan_model_and_gpu_slot(monkeypatch, tmp_path, audio_input):
+    class VulkanModels:
+        def is_downloading(self, name, cache_dir, device):
+            assert (name, device) == ('tiny', 'vulkan')
+            return False
+
+        def available(self, name, cache_dir, device):
+            assert (name, device) == ('tiny', 'vulkan')
+            return True
+
+    service, options, engine, tasks, _ = make_service(monkeypatch, tmp_path, device='vulkan', models=VulkanModels())
+    tasks.vulkan_engine = engine
+    service.start(3, options, 2, 'tab-a')
+    try:
+        wait_for(lambda: service.snapshot()['phase'] == 'listening')
+        assert not tasks.gpu_slot.acquire(blocking=False)
+        audio_input[0].feed(np.full(32000, 16384, dtype=np.int16))
+        wait_for(lambda: service.transcript() == 'fragment 1')
+        service.stop('tab-a', finish=False)
+        wait_for(lambda: service.snapshot()['phase'] == 'stopped')
+        assert tasks.gpu_slot.acquire(blocking=False)
+        tasks.gpu_slot.release()
+        assert engine.unloaded == 1
+    finally:
+        service.shutdown()
+
+
 def test_recording_and_live_captions_do_not_open_the_microphone_together(monkeypatch, tmp_path, audio_input):
     service, options, _, _, microphone_lock = make_service(monkeypatch, tmp_path)
     monkeypatch.setattr(recorder, 'RECORDINGS', tmp_path / 'recordings')

@@ -1,16 +1,18 @@
 # WhysperGUI
 
-Lokalny panel NiceGUI do transkrypcji audio i wideo za pomocą Faster-Whisper.
+Lokalny panel NiceGUI do transkrypcji audio i wideo za pomocą Faster-Whisper
+lub whisper.cpp z Vulkan.
 Przetwarzanie odbywa się na komputerze użytkownika; aplikacja nie wysyła nagrań
 do zewnętrznego API. Dostęp do sieci jest potrzebny przy instalacji i pobieraniu
 modeli. Po ich pobraniu transkrypcja i VAD działają offline.
 
 ## Wymagania i uruchomienie
 
-- Windows 10/11, 64-bitowy Python 3.11 lub 3.12 i odpowiednia ilość wolnego miejsca.
+- Windows 10/11 lub Linux, 64-bitowy Python 3.12 i odpowiednia ilość wolnego miejsca.
 - Do CUDA: aktualny sterownik NVIDIA, zgodny z kartą; na komputerze docelowym
-  sprawdzono RTX 4070 Ti, compute capability 12.0 i sterownik 621.14.
-- Instalator pobiera m.in. duży pakiet PyTorch CUDA oraz model `tiny` do testu.
+  sprawdzono RTX 5070 Ti z compute capability 12.0.
+- Instalator Windows przy wykrytym NVIDIA pobiera duży pakiet PyTorch CUDA
+  oraz model `tiny` do testu. Dla CPU i Vulkan nie są one wymagane.
   Model domyślny `large-v3` zajmuje około 3 GB i jest pobierany przy pierwszym
   użyciu lub przez zakładkę **Modele AI**.
 
@@ -23,18 +25,70 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 .\start.bat
 ```
 
-Instalator korzysta z istniejącego `.venv` albo tworzy nowe środowisko. Nie zmienia
-globalnego Pythona ani CUDA Toolkit. Wykonuje `pip check`, diagnostykę i test
-inferencji modelu `tiny`. W razie błędu podaje raport; nie stwierdza sukcesu GPU
-na podstawie samego wykrycia karty.
+Instalator korzysta z `.venv-py312` albo tworzy je w Pythonie 3.12. Poprzednie
+środowisko `.venv` z Pythonem 3.11 pozostaje zachowane, podobnie jak modele,
+historia, nagrania i eksporty. W Windows skrypt wyszukuje również Pythona 3.12
+zainstalowanego przez `uv`; można też ustawić `WHYSPER_PYTHON` na jego ścieżkę.
+Instalator nie zmienia
+globalnego Pythona ani CUDA Toolkit. Wykonuje `pip check` i diagnostykę; przy
+instalacji CUDA wykonuje też test inferencji modelu `tiny`. Błąd CUDA nie blokuje
+CPU ani Vulkan. Aby pominąć instalację CUDA mimo wykrycia NVIDIA, uruchom
+`install.ps1 -SkipCuda`; parametr `-Cuda` wymusza instalację CUDA.
+
+### Linux
+
+Zainstaluj Python 3.12 wraz z `venv` i systemową bibliotekę PortAudio
+(na Debianie/Ubuntu pakiet `libportaudio2`). Następnie w katalogu projektu:
+
+```bash
+bash install.sh                 # środowisko CPU
+# albo: bash install.sh --cuda  # także biblioteki NVIDIA CUDA 12/cuDNN 9
+bash start.sh
+```
+
+Wybierz **CPU** w formularzu lub w ustawieniach, jeśli nie używasz CUDA albo
+Vulkan. Do CUDA potrzebny jest zgodny sterownik NVIDIA; `start.sh` dodaje
+biblioteki z pakietów NVIDIA do `LD_LIBRARY_PATH`. W przypadku ręcznego
+uruchamiania Pythona zadbaj o tę zmienną samodzielnie. Jeśli masz inny plik
+Pythona 3.12, ustaw `WHYSPER_PYTHON` przed instalacją. Skrypty nie
+instalują pakietów systemowych ani nie usuwają istniejącego środowiska.
+
+### Vulkan na Windows i Linuksie
+
+Zainstaluj sterownik GPU z obsługą Vulkan oraz narzędzia do budowania
+whisper.cpp: Git, CMake, kompilator C/C++ i Vulkan SDK (w tym `glslc`).
+Przykładowo na Debianie/Ubuntu, po zainstalowaniu tych narzędzi:
+
+```bash
+git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git tools/whisper.cpp
+cmake -S tools/whisper.cpp -B tools/whisper.cpp/build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build tools/whisper.cpp/build --config Release --parallel
+```
+
+Te same polecenia CMake można wykonać w PowerShellu z zainstalowanymi Visual
+Studio Build Tools i Vulkan SDK. Aplikacja szuka `whisper-cli` w katalogu
+`tools/whisper.cpp/build/bin` (także w `Release`) lub na `PATH`. Można również
+ustawić pełną ścieżkę zmienną `WHYSPER_WHISPER_CLI`. Więcej informacji:
+[instrukcja Vulkan whisper.cpp](https://github.com/ggml-org/whisper.cpp#vulkan-gpu-support).
+
+W aplikacji wybierz **GPU · Vulkan** i numer GPU (domyślnie 0). W **Modele AI**
+wybierz format **Whisper.cpp · Vulkan** i pobierz model GGML; zadanie może
+też pobrać go automatycznie. Modele GGML są oddzielne od modeli CPU/CUDA.
+Program wymaga potwierdzenia użycia backendu Vulkan w logu whisper.cpp; bez
+niego zadanie kończy się błędem. `whisper-cli` ładuje model dla każdej porcji
+mowy, więc napisy na żywo mogą mieć duże opóźnienie. Vulkan obsługuje VAD,
+rozmówców, język, tłumaczenie (oprócz turbo), kontekst początkowy i przybliżone
+znaczniki słów. Precyzja wynika z formatu modelu. Opcje `patience`, kary i
+blokady powtórzeń, podpowiedzi słów, wyłączenie kontekstu oraz pozostawienie
+modelu w pamięci dotyczą faster-whisper i są wyłączone dla Vulkan.
 
 ## Repozytorium Git
 
 Repozytorium zawiera kod, skrypty instalacyjne, listę zależności oraz małe próbki
-potrzebne do testów. `.gitignore` pomija lokalne środowisko `.venv`, domyślne
+potrzebne do testów. `.gitignore` pomija lokalne środowiska `.venv-py312` i `.venv`, domyślne
 modele, nagrania, historię, eksporty i logi. Pozostają one na komputerze i nie
 muszą być wysyłane do GitHuba. Po sklonowaniu `start.bat` utworzy środowisko i
-pobierze zależności oraz model używany do testu instalacji.
+pobierze zależności; test CUDA pobiera także model `tiny`.
 
 Jeśli w ustawieniach wybierzesz własny katalog modeli lub eksportów, umieść go
 poza repozytorium albo dodaj go do `.gitignore`. Przed każdym commitem sprawdź
@@ -98,7 +152,10 @@ i [oficjalne pakiety PyTorch CUDA 12.8](https://pytorch.org/get-started/previous
    automatycznym zapisem, wyszukiwaniem i pobieraniem TXT, SRT, VTT, JSON i CSV.
    Długie transkrypcje są wyświetlane po 50 fragmentów na stronie; wyszukiwanie,
    kopiowanie i eksport obejmują cały tekst. Wyszukiwanie uwzględnia również
-   nazwy rozmówców.
+   nazwy rozmówców. Filtr pozwala wyświetlić wybranych rozmówców lub fragmenty
+   z nieustalonym głosem, także łącznie z wyszukiwaniem. Przełącznik **Pokaż
+   znaczniki czasu** ukrywa lub pokazuje czasy w edytorze; kopiowanie całości
+   i eksport obejmują pełną transkrypcję.
    **Ponów eksport** nadpisuje pliki eksportu poprawionym tekstem. Korekta tekstu
    segmentu usuwa wcześniejsze znaczniki słów tego segmentu, bo mogłyby już nie
    odpowiadać treści. Opcja **Edytuj rozmówców** pozwala poprawić lub wpisać
@@ -145,8 +202,10 @@ tylko przy włączonym filtrze. Kontekst wcześniejszego tekstu działa w ramach
 bieżącej porcji audio, nie pomiędzy niezależnymi porcjami do 30 sekund.
 
 Napisy na żywo korzystają z zapisanych ustawień transkrypcji, w tym filtra VAD
-i wybranego GPU. Dźwięk z mikrofonu pozostaje w pamięci i nie jest zapisywany
-do pliku. Tekst całej bieżącej sesji można skopiować lub pobrać jako TXT;
+i wybranego GPU. W CPU/CUDA dźwięk z mikrofonu pozostaje w pamięci. Vulkan
+zapisuje porcje WAV oraz wynik JSON do plików tymczasowych i usuwa je po
+przetworzeniu; po nieoczekiwanym przerwaniu procesu mogą one pozostać w `data/tmp`. Tekst
+całej bieżącej sesji można skopiować lub pobrać jako TXT;
 uruchomienie nowej sesji zastępuje wcześniejszy tekst. Przycisk **Zatrzymaj**
 zamyka mikrofon i kończy przetwarzanie zebranych porcji. Wyjście z zakładki lub
 zamknięcie karty przerywa nasłuch i porzuca jeszcze nieprzetworzone porcje.
@@ -208,9 +267,12 @@ Silnik diarizacji zapewnia [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
 inferencję na karcie wybranej w diagnostyce, w osobnym procesie. Pokaże też
 błędy brakujących DLL oraz listę kart widocznych dla CUDA. W konsoli:
 
+**Uruchom test Vulkan** wymaga pobranego modelu `tiny` w formacie Vulkan i
+wykonuje próbkę przez whisper.cpp, sprawdzając potwierdzenie użycia backendu.
+
 ```powershell
-.\.venv\Scripts\python.exe -m app.core.gpu_manager --test
-.\.venv\Scripts\python.exe -m app.core.gpu_manager --test --gpu-id cuda:1
+.\.venv-py312\Scripts\python.exe -m app.core.gpu_manager --test
+.\.venv-py312\Scripts\python.exe -m app.core.gpu_manager --test --gpu-id cuda:1
 powershell -ExecutionPolicy Bypass -File .\repair.ps1
 powershell -ExecutionPolicy Bypass -File .\repair.ps1 -Full
 powershell -ExecutionPolicy Bypass -File .\update.ps1
@@ -222,28 +284,29 @@ aktualizacji przyjmują parametr `-GpuId cuda:1`. Jeśli test pierwszej karty
 blokuje pierwszą instalację, można użyć `install.ps1 -SkipGpuTest`, uruchomić
 aplikację, wybrać inną kartę i wykonać test w diagnostyce.
 
-Zwykła naprawa instaluje brakujące zależności i wykonuje test; `-Full` wymusza
-ponowną instalację pakietów oraz dużego pakietu PyTorch. Aktualizacja źródeł
+Zwykła naprawa instaluje brakujące zależności i wykonuje dostępny test; `-Full`
+wymusza ponowną instalację pakietów aplikacji. Parametry `-SkipCuda` i `-Cuda`
+działają również w skryptach naprawy i aktualizacji. Aktualizacja źródeł
 przez `update.ps1` działa wyłącznie w czystym checkoutcie Git i używa
 `git pull --ff-only`; w innym przypadku należy zaktualizować źródła osobno.
-`uninstall.ps1` usuwa `.venv`, zachowując dane i kod źródłowy. Jawne
+`uninstall.ps1` usuwa `.venv-py312`, zachowując poprzednie `.venv`, dane i kod źródłowy. Jawne
 `uninstall.ps1 -RemoveData` usuwa także lokalne `data`, `models`, `output` i
 `logs`; nie usuwa niestandardowych katalogów wskazanych w ustawieniach.
 
 ## Testy
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q -m "not gpu and not large_gpu and not ui"
+.\.venv-py312\Scripts\python.exe -m pytest -q -m "not gpu and not large_gpu and not ui"
 $env:WHYSPER_GPU_TEST = '1'
-.\.venv\Scripts\python.exe -m pytest -q -m gpu
+.\.venv-py312\Scripts\python.exe -m pytest -q -m gpu
 $env:WHYSPER_LARGE_TEST = '1'
-.\.venv\Scripts\python.exe -m pytest -q -m large_gpu
+.\.venv-py312\Scripts\python.exe -m pytest -q -m large_gpu
 # Przy uruchomionym serwerze:
 $env:WHYSPER_UI_TEST = '1'
-.\.venv\Scripts\python.exe -m pytest -q -m ui
+.\.venv-py312\Scripts\python.exe -m pytest -q -m ui
 # Pełny przebieg GUI, w tym GPU, edycja i pobranie TXT:
 $env:WHYSPER_UI_FULL_TEST = '1'
-.\.venv\Scripts\python.exe -m pytest -q -m ui
+.\.venv-py312\Scripts\python.exe -m pytest -q -m ui
 ```
 
 Test GPU wymaga faktycznej RTX 5070 Ti i pobranego `tiny`: wykonuje inferencję

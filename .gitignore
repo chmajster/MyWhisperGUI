@@ -1,5 +1,6 @@
 # Środowiska i pliki generowane przez Pythona
 .venv/
+.venv-py312/
 venv/
 __pycache__/
 *.py[cod]
@@ -12,6 +13,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+tools/whisper.cpp/
 
 # Lokalne dane aplikacji: historia, nagrania, modele, eksporty i dzienniki
 data/

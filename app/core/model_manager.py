@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 
-from app.config import MODEL_REPOS, MODEL_SIZES, ROOT
+from app.config import MODEL_REPOS, MODEL_SIZES, ROOT, VULKAN_MODEL_REPO, VULKAN_MODELS
 
 
 class DownloadCancelled(Exception):
@@ -26,7 +26,10 @@ class _DownloadRun:
 
 
 def _worker_command(repo, path, metadata, error):
-    return [sys.executable, '-m', 'app.core.model_download_worker', repo, str(path), str(metadata), str(error)]
+    command = [sys.executable, '-m', 'app.core.model_download_worker', repo, str(path), str(metadata), str(error)]
+    if repo == VULKAN_MODEL_REPO:
+        command.append(VULKAN_MODELS[path.name])
+    return command
 
 
 class ModelManager:
@@ -38,27 +41,31 @@ class ModelManager:
         self.closing = False
 
     @staticmethod
-    def path(name, cache_dir):
+    def path(name, cache_dir, device='cpu'):
         if name not in MODEL_REPOS:
             raise ValueError('Nieznany model.')
-        return Path(cache_dir).expanduser().resolve() / name
+        root = Path(cache_dir).expanduser().resolve()
+        return root / 'whisper-cpp' / name if device == 'vulkan' else root / name
 
-    def available(self, name, cache_dir):
-        directory = self.path(name, cache_dir)
+    def available(self, name, cache_dir, device='cpu'):
+        directory = self.path(name, cache_dir, device)
         try:
+            if device == 'vulkan':
+                file = directory / VULKAN_MODELS[name]
+                return file.is_file() and file.stat().st_size > 0
             return all((directory / f).is_file() and (directory / f).stat().st_size > 0
                        for f in ('model.bin', 'config.json', 'tokenizer.json'))
         except OSError:
             # A downloader can rename or remove a file between the two checks.
             return False
 
-    def is_downloading(self, name, cache_dir):
-        key = (str(self.path(name, cache_dir)), name)
+    def is_downloading(self, name, cache_dir, device='cpu'):
+        key = (str(self.path(name, cache_dir, device)), name)
         with self.lock:
             return key in self.active
 
-    def details(self, name, cache_dir):
-        path = self.path(name, cache_dir)
+    def details(self, name, cache_dir, device='cpu'):
+        path = self.path(name, cache_dir, device)
         size = 0
         try:
             for item in path.rglob('*'):
@@ -72,7 +79,7 @@ class ModelManager:
             pass
         with self.lock:
             state = dict(self.states.get((str(path), name), {}))
-        return {'name': name, 'path': str(path), 'available': self.available(name, cache_dir),
+        return {'name': name, 'path': str(path), 'available': self.available(name, cache_dir, device),
                 'size': size, 'estimated': MODEL_SIZES[name], **state}
 
     def _run_download(self, repo, path, key, run):
@@ -135,8 +142,8 @@ class ModelManager:
                         process.kill()
                         process.wait(timeout=3)
 
-    def download(self, name, cache_dir):
-        path = self.path(name, cache_dir)
+    def download(self, name, cache_dir, device='cpu'):
+        path = self.path(name, cache_dir, device)
         key = (str(path), name)
         with self.lock:
             if self.closing:
@@ -155,12 +162,12 @@ class ModelManager:
                 raise DownloadCancelled('Pobieranie modelu anulowano.') from run.error
             if run.error is not None:
                 raise RuntimeError('Pobieranie modelu nie powiodło się. Sprawdź zakładkę Modele AI.') from run.error
-            if self.available(name, cache_dir):
+            if self.available(name, cache_dir, device):
                 return path
             raise RuntimeError('Pobieranie modelu nie powiodło się. Sprawdź zakładkę Modele AI.')
         try:
-            total = self._run_download(MODEL_REPOS[name], path, key, run)
-            if not self.available(name, cache_dir):
+            total = self._run_download(VULKAN_MODEL_REPO if device == 'vulkan' else MODEL_REPOS[name], path, key, run)
+            if not self.available(name, cache_dir, device):
                 raise RuntimeError('Model jest niekompletny po pobraniu.')
             with self.lock:
                 self.states[key].update(status='Pobrano', downloaded=total, total=total)
@@ -181,8 +188,8 @@ class ModelManager:
                 self.runs.pop(key, None)
                 run.done.set()
 
-    def cancel_download(self, name, cache_dir):
-        key = (str(self.path(name, cache_dir)), name)
+    def cancel_download(self, name, cache_dir, device='cpu'):
+        key = (str(self.path(name, cache_dir, device)), name)
         with self.lock:
             run = self.runs.get(key)
             if not run or self.states[key]['status'] not in ('Sprawdzanie plików', 'Pobieranie'):
@@ -203,10 +210,10 @@ class ModelManager:
         for run in runs:
             run.done.wait(max(0, deadline - time.monotonic()))
 
-    def start_download(self, name, cache_dir):
+    def start_download(self, name, cache_dir, device='cpu'):
         def work():
             try:
-                self.download(name, cache_dir)
+                self.download(name, cache_dir, device)
             except DownloadCancelled:
                 pass
             except Exception:
@@ -214,8 +221,8 @@ class ModelManager:
         thread = threading.Thread(target=work, daemon=True)
         thread.start()
 
-    def delete(self, name, cache_dir):
-        path = self.path(name, cache_dir)
+    def delete(self, name, cache_dir, device='cpu'):
+        path = self.path(name, cache_dir, device)
         with self.lock:
             if (str(path), name) in self.active:
                 raise RuntimeError('Nie można usunąć modelu podczas pobierania.')

@@ -80,9 +80,10 @@ class LiveCaptions:
             raise ValueError('Długość porcji musi wynosić od 2 do 15 sekund.')
         if options.task != 'transcribe':
             raise ValueError('Napisy na żywo obsługują obecnie transkrypcję w języku mowy.')
-        if self.models.is_downloading(options.model, options.cache_dir):
+        model_args = (options.model, options.cache_dir, 'vulkan') if options.device == 'vulkan' else (options.model, options.cache_dir)
+        if self.models.is_downloading(*model_args):
             raise ValueError('Poczekaj na zakończenie pobierania wybranego modelu.')
-        if not self.models.available(options.model, options.cache_dir):
+        if not self.models.available(*model_args):
             raise ValueError('Najpierw pobierz wybrany model w zakładce Modele AI.')
         with self.lock:
             if (self._thread and self._thread.is_alive()) or not self._capture_closed.is_set():
@@ -235,7 +236,7 @@ class LiveCaptions:
                                           lambda: self._capture_stop.is_set() or self.tasks.stop_event.is_set())
             if self._capture_stop.is_set() or self.tasks.stop_event.is_set():
                 return
-            if options.device == 'cuda':
+            if options.device in ('cuda', 'vulkan'):
                 with self.lock:
                     self.phase = 'waiting_gpu'
                 while not self._capture_stop.is_set() and not self.tasks.stop_event.is_set():
@@ -244,7 +245,7 @@ class LiveCaptions:
                         break
                 if not gpu_acquired:
                     return
-                engine = self.tasks.gpu_engine
+                engine = self.tasks.vulkan_engine if options.device == 'vulkan' else self.tasks.gpu_engine
             else:
                 engine = WhisperEngine(self.models)
             if self._capture_stop.is_set() or self.tasks.stop_event.is_set():
